@@ -31,4 +31,4 @@ python MojNovyLauncher/launcher.py
 
 ### Скриншоты
 <img width="302" height="232" alt="image" src="https://github.com/user-attachments/assets/b848c604-b831-42a1-9cf5-e00db455f37c" />
-![image](https://github.com/user-attachments/assets/4bc4d077-28d6-43d8-81e0-802445674aa4)
+<img width="202" height="122" alt="image" src="https://github.com/user-attachments/assets/f7485ea4-b203-4963-809d-a9c03ff6fee1" />
