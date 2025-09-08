@@ -1,0 +1,8 @@
+[21:06:05] [main/INFO]: Setting user: Maybeyoou
+[21:06:05] [main/INFO]: (Session ID is token::)
+[21:06:05] [Client thread/INFO]: LWJGL Version: 2.9.1
+[21:06:06] [Client thread/INFO]: Reloading ResourceManager: Default
+[21:06:06] [Client thread/INFO]: Created: 512x256 textures/blocks-atlas
+[21:06:06] [Client thread/INFO]: Created: 256x256 textures/items-atlas
+[21:06:07] [Sound Library Loader/INFO]: Sound engine started
+[21:06:10] [Client thread/INFO]: Stopping!
