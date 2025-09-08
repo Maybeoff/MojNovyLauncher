@@ -30,5 +30,5 @@ python MojNovyLauncher/launcher.py
 - При запуске без интернета лаунчер не будет скачивать JRE/артефакты — запустятся только уже установленные версии.
 
 ### Скриншоты
-![image](https://github.com/user-attachments/assets/ac7b7b57-5911-48c4-af4a-29524d3543b4)
+<img width="302" height="232" alt="image" src="https://github.com/user-attachments/assets/b848c604-b831-42a1-9cf5-e00db455f37c" />
 ![image](https://github.com/user-attachments/assets/4bc4d077-28d6-43d8-81e0-802445674aa4)
