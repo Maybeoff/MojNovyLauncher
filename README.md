@@ -49,6 +49,7 @@ python MojNovyLauncher/launcher.py
 - Fabric версии создают отдельные профили для модов в папке `profiles/`
 
 ### Скриншоты
-<img width="322" height="258" alt="image" src="https://github.com/user-attachments/assets/9f08c81e-24dc-4014-9c9b-41ce692b0fef" /> \n
+<img width="322" height="258" alt="image" src="https://github.com/user-attachments/assets/9f08c81e-24dc-4014-9c9b-41ce692b0fef" /> /n
 <img width="202" height="122" alt="image" src="https://github.com/user-attachments/assets/f7485ea4-b203-4963-809d-a9c03ff6fee1" />
+
 
