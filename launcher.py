@@ -1,6 +1,6 @@
 import os
 import json
-from subprocess import call
+from subprocess import call, Popen, PIPE, STDOUT
 from sys import argv, exit
 
 from PyQt5.QtCore import QThread, pyqtSignal, QSize, Qt
@@ -114,6 +114,7 @@ class LaunchThread(QThread):
     progress_update_signal = pyqtSignal(int, int, str)
     state_update_signal = pyqtSignal(bool)
     message_signal = pyqtSignal(str, str)
+    console_output_signal = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
@@ -296,7 +297,17 @@ class LaunchThread(QThread):
             minecraft_directory=minecraft_directory,
             options=options
         )
-        call(cmd)
+        try:
+            # Запускаем процесс с перенаправлением вывода в консоль вкладки
+            process = Popen(cmd, stdout=PIPE, stderr=STDOUT, universal_newlines=True)
+            if process.stdout is not None:
+                for line in iter(process.stdout.readline, ''):
+                    if line == '':
+                        break
+                    self.console_output_signal.emit(line.rstrip('\n'))
+            process.wait()
+        except Exception as e:
+            self.console_output_signal.emit(f"[Launcher] Ошибка запуска: {e}")
 
         self.state_update_signal.emit(False)
 
@@ -660,7 +671,18 @@ class MainWindow(QMainWindow):
 
         console_tab = QWidget()
         console_layout = QVBoxLayout(console_tab)
-        console_layout.addWidget(QLabel('Консоль (скоро)', console_tab))
+        console_controls = QHBoxLayout()
+        self.console_clear_btn = QPushButton('Очистить', console_tab)
+        self.console_autoscroll = QCheckBox('Автопрокрутка', console_tab)
+        self.console_autoscroll.setChecked(True)
+        self.console_clear_btn.clicked.connect(lambda: self.console_view.clear())
+        console_controls.addWidget(self.console_clear_btn)
+        console_controls.addStretch(1)
+        console_controls.addWidget(self.console_autoscroll)
+        self.console_view = QTextBrowser(console_tab)
+        self.console_view.setOpenExternalLinks(True)
+        console_layout.addLayout(console_controls)
+        console_layout.addWidget(self.console_view)
         self.center_tabs.addTab(console_tab, 'Консоль')
 
         # Список версий и фильтр (нижняя панель)
