@@ -574,7 +574,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle('MJNL v1.2.2')
+        self.setWindowTitle('MJNL v1.3.1-beta')
         self.resize(300, 200)
         self.centralwidget = QWidget(self)
 
@@ -613,6 +613,16 @@ class MainWindow(QMainWindow):
         self.settings_button.setToolTip('Настройки')
         self.settings_button.clicked.connect(self.open_settings)
         right_panel.addWidget(self.settings_button, 0, Qt.AlignRight)
+
+        # Превью скина выбранного аккаунта
+        self.skin_preview = QLabel(self.centralwidget)
+        self.skin_preview.setMinimumSize(QSize(120, 180))
+        self.skin_preview.setMaximumSize(QSize(160, 240))
+        self.skin_preview.setScaledContents(True)
+        right_panel.addWidget(self.skin_preview, 0, Qt.AlignRight)
+        refresh_skin_btn = QPushButton('Обновить скин', self.centralwidget)
+        refresh_skin_btn.clicked.connect(self.refresh_skin_preview)
+        right_panel.addWidget(refresh_skin_btn, 0, Qt.AlignRight)
         right_panel.addStretch(1)
 
         # ЦЕНТРАЛЬНЫЕ ВКЛАДКИ (Legacy-стиль)
@@ -748,6 +758,11 @@ class MainWindow(QMainWindow):
             self.load_news()
         except Exception:
             pass
+        # Первичная загрузка скина
+        try:
+            self.refresh_skin_preview()
+        except Exception:
+            pass
         # Инициализируем список версий для фильтра модов
         try:
             self.populate_mods_game_versions()
@@ -762,6 +777,10 @@ class MainWindow(QMainWindow):
         self.launch_thread.state_update_signal.connect(self.state_update)
         self.launch_thread.progress_update_signal.connect(self.update_progress)
         self.launch_thread.message_signal.connect(self.show_message)
+        self.launch_thread.console_output_signal.connect(self.append_console)
+
+        # Обновление превью скина при смене аккаунта
+        self.account_type.currentIndexChanged.connect(self.refresh_skin_preview)
 
     def load_news(self):
         url = 'https://raw.githubusercontent.com/Maybeoff/MojNovyLauncher/main/README.md'
@@ -1241,6 +1260,32 @@ class MainWindow(QMainWindow):
 
     def show_message(self, title: str, text: str):
         QMessageBox.information(self, title, text)
+    
+    def append_console(self, line: str):
+        try:
+            if not hasattr(self, 'console_view'):
+                return
+            self.console_view.append(line)
+            if self.console_autoscroll.isChecked():
+                self.console_view.moveCursor(self.console_view.textCursor().End)
+        except Exception:
+            pass
+
+    def refresh_skin_preview(self):
+        try:
+            nick = self.account_type.currentText().strip() or 'Steve'
+            url = f'https://minotar.net/armor/body/{nick}/160.png'
+            headers = {'User-Agent': 'MojNovyLauncher/1.2 (skin-preview)'}
+            r = requests.get(url, headers=headers, timeout=8)
+            if r.status_code == 200:
+                pix = QPixmap()
+                if pix.loadFromData(r.content):
+                    self.skin_preview.setPixmap(pix)
+                    return
+        except Exception:
+            pass
+        # Фолбэк: пустое превью
+        self.skin_preview.setPixmap(QPixmap())
     
     def load_settings(self):
         """Загружает настройки приложения"""
