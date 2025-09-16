@@ -4,11 +4,13 @@ from subprocess import call
 from sys import argv, exit
 
 from PyQt5.QtCore import QThread, pyqtSignal, QSize, Qt
-from PyQt5.QtGui import QPixmap
+from PyQt5.QtGui import QPixmap, QIcon
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QComboBox, QProgressBar,
     QPushButton, QApplication, QMainWindow, QHBoxLayout,
-    QInputDialog, QMessageBox
+    QInputDialog, QMessageBox, QDialog, QFormLayout,
+    QLineEdit, QSpinBox, QCheckBox, QGroupBox, QTabWidget,
+    QSystemTrayIcon, QMenu, QAction
 )
 
 from minecraft_launcher_lib.utils import get_minecraft_directory, get_version_list
@@ -18,6 +20,11 @@ try:
     from minecraft_launcher_lib.fabric import install_fabric as mll_install_fabric  # type: ignore
 except Exception:
     mll_install_fabric = None
+
+try:
+    from minecraft_launcher_lib.quilt import install_quilt as mll_install_quilt  # type: ignore
+except Exception:
+    mll_install_quilt = None
  
 
 # Путь установки Minecraft для MjnLauncher
@@ -77,10 +84,14 @@ class LaunchThread(QThread):
                         if os.path.isfile(os.path.join(versions_dir, entry, f"{entry}.json")):
                             candidates.append(entry)
                 if candidates:
-                    # Приоритет fabric-loader-* (реальная сборка), затем алиасы
+                    # Приоритет: fabric-loader-*, quilt-loader-*, затем алиасы
                     def candidate_key(e: str) -> tuple:
-                        is_loader = e.startswith('fabric-loader-')
-                        return (0 if is_loader else 1, e)
+                        if e.startswith('fabric-loader-'):
+                            return (0, e)
+                        elif e.startswith('quilt-loader-'):
+                            return (1, e)
+                        else:
+                            return (2, e)
                     candidates.sort(key=candidate_key)
                     return candidates[0]
             except Exception:
@@ -111,6 +122,16 @@ class LaunchThread(QThread):
                             'setMax': self.update_progress_max
                         }
                     )
+                elif loader == 'quilt' and mll_install_quilt is not None:
+                    mll_install_quilt(
+                        minecraft_version=base_version,
+                        minecraft_directory=minecraft_directory,
+                        callback={
+                            'setStatus': self.update_progress_label,
+                            'setProgress': self.update_progress,
+                            'setMax': self.update_progress_max
+                        }
+                    )
                 else:
                     pass
             except Exception:
@@ -124,7 +145,7 @@ class LaunchThread(QThread):
         loader = ''
         if ' ' in self.version_id:
             parts = self.version_id.split()
-            if len(parts) >= 2 and parts[-1].lower() in {'fabric'}:
+            if len(parts) >= 2 and parts[-1].lower() in {'fabric', 'quilt'}:
                 loader = parts[-1].lower()
                 base_version = ' '.join(parts[:-1])
                 # Пытаемся найти уже установленную мод-версию
@@ -136,8 +157,8 @@ class LaunchThread(QThread):
                     self.message_signal.emit('Ошибка установки', f'Не удалось установить {loader} для {base_version}. Проверьте интернет или совместимость версии.')
                     self.state_update_signal.emit(False)
                     return
-                # Создаём алиас-версию с читаемым названием, например "1.21.8 fabric"
-                if 'fabric' in version_to_launch.lower():
+                # Создаём алиас-версию с читаемым названием, например "1.21.8 fabric" или "1.21.8 quilt"
+                if 'fabric' in version_to_launch.lower() or 'quilt' in version_to_launch.lower():
                     alias_id = f"{base_version} {loader}"
                     try:
                         alias_dir = os.path.join(minecraft_directory, 'versions', alias_id)
@@ -155,7 +176,7 @@ class LaunchThread(QThread):
                     except Exception:
                         pass
                 # Для модовой версии используем отдельную папку профиля
-                game_dir_override = os.path.join(minecraft_directory, 'profiles', f"{base_version}-fabric")
+                game_dir_override = os.path.join(minecraft_directory, 'profiles', f"{base_version}-{loader}")
                 try:
                     os.makedirs(game_dir_override, exist_ok=True)
                     for sub in ['mods', 'config', 'resourcepacks', 'saves']:
@@ -202,11 +223,269 @@ class LaunchThread(QThread):
         self.state_update_signal.emit(False)
 
 
+class SettingsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Настройки MJNL')
+        self.setModal(True)
+        self.resize(500, 400)
+        
+        # Основной лэйаут
+        layout = QVBoxLayout(self)
+        
+        # Создаем табы
+        tab_widget = QTabWidget()
+        
+        # Таб "Общие"
+        general_tab = QWidget()
+        general_layout = QFormLayout(general_tab)
+        
+        # Путь к Java
+        self.java_path_edit = QLineEdit()
+        self.java_path_edit.setPlaceholderText("Автоопределение")
+        general_layout.addRow("Путь к Java:", self.java_path_edit)
+        
+        # Память для JVM
+        self.memory_spinbox = QSpinBox()
+        self.memory_spinbox.setRange(512, 8192)
+        self.memory_spinbox.setValue(2048)
+        self.memory_spinbox.setSuffix(" MB")
+        general_layout.addRow("Память JVM:", self.memory_spinbox)
+        
+        # Автозапуск последней версии
+        self.auto_launch_checkbox = QCheckBox()
+        general_layout.addRow("Автозапуск последней версии:", self.auto_launch_checkbox)
+        
+        # Сворачивание в трей
+        self.minimize_to_tray_checkbox = QCheckBox()
+        general_layout.addRow("Сворачивать в трей:", self.minimize_to_tray_checkbox)
+        
+        # Таб "Интерфейс"
+        interface_tab = QWidget()
+        interface_layout = QFormLayout(interface_tab)
+        
+        # Темная тема
+        self.dark_theme_checkbox = QCheckBox()
+        interface_layout.addRow("Темная тема:", self.dark_theme_checkbox)
+        
+        # Размер окна
+        self.window_size_combo = QComboBox()
+        self.window_size_combo.addItems(["300x200", "400x300", "500x400", "600x500"])
+        self.window_size_combo.setCurrentText("300x200")
+        interface_layout.addRow("Размер окна:", self.window_size_combo)
+        
+        # Таб "Модлоадеры"
+        modloaders_tab = QWidget()
+        modloaders_layout = QFormLayout(modloaders_tab)
+        
+        # Поддержка Quilt
+        self.quilt_support_checkbox = QCheckBox()
+        modloaders_layout.addRow("Поддержка Quilt (бета):", self.quilt_support_checkbox)
+        
+        # Автоустановка модлоадеров
+        self.auto_install_modloaders_checkbox = QCheckBox()
+        modloaders_layout.addRow("Автоустановка модлоадеров:", self.auto_install_modloaders_checkbox)
+        
+        # Добавляем табы
+        tab_widget.addTab(general_tab, "Общие")
+        tab_widget.addTab(interface_tab, "Интерфейс")
+        tab_widget.addTab(modloaders_tab, "Модлоадеры")
+        
+        layout.addWidget(tab_widget)
+        
+        # Кнопки
+        button_layout = QHBoxLayout()
+        self.save_button = QPushButton("Сохранить")
+        self.cancel_button = QPushButton("Отмена")
+        self.save_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.reject)
+        
+        button_layout.addWidget(self.save_button)
+        button_layout.addWidget(self.cancel_button)
+        layout.addLayout(button_layout)
+        
+        # Загружаем настройки
+        self.load_settings()
+        
+        # Применяем тему родительского окна
+        if parent and hasattr(parent, 'settings'):
+            if parent.settings.get('dark_theme', False):
+                self.apply_dark_theme()
+    
+    def load_settings(self):
+        """Загружает настройки из конфига"""
+        try:
+            config_path = os.path.join(
+                os.getenv('APPDATA'), '.MjnLauncher', 'client', 'settings.json'
+            )
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    
+                self.java_path_edit.setText(settings.get('java_path', ''))
+                self.memory_spinbox.setValue(settings.get('memory', 2048))
+                self.auto_launch_checkbox.setChecked(settings.get('auto_launch', False))
+                self.minimize_to_tray_checkbox.setChecked(settings.get('minimize_to_tray', False))
+                self.dark_theme_checkbox.setChecked(settings.get('dark_theme', False))
+                self.window_size_combo.setCurrentText(settings.get('window_size', '300x200'))
+                self.quilt_support_checkbox.setChecked(settings.get('quilt_support', False))
+                self.auto_install_modloaders_checkbox.setChecked(settings.get('auto_install_modloaders', True))
+        except Exception:
+            pass
+    
+    def save_settings(self):
+        """Сохраняет настройки в конфиг"""
+        try:
+            config_path = os.path.join(
+                os.getenv('APPDATA'), '.MjnLauncher', 'client', 'settings.json'
+            )
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            
+            settings = {
+                'java_path': self.java_path_edit.text(),
+                'memory': self.memory_spinbox.value(),
+                'auto_launch': self.auto_launch_checkbox.isChecked(),
+                'minimize_to_tray': self.minimize_to_tray_checkbox.isChecked(),
+                'dark_theme': self.dark_theme_checkbox.isChecked(),
+                'window_size': self.window_size_combo.currentText(),
+                'quilt_support': self.quilt_support_checkbox.isChecked(),
+                'auto_install_modloaders': self.auto_install_modloaders_checkbox.isChecked()
+            }
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=4, ensure_ascii=False)
+                
+            return True
+        except Exception:
+            return False
+    
+    def apply_dark_theme(self):
+        """Применяет темную тему к окну настроек"""
+        dark_style = """
+        QDialog {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QWidget {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QPushButton {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 6px;
+            color: #ffffff;
+        }
+        QPushButton:hover {
+            background-color: #505050;
+        }
+        QPushButton:pressed {
+            background-color: #353535;
+        }
+        QComboBox {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QComboBox:hover {
+            background-color: #505050;
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid #ffffff;
+            margin-right: 5px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #404040;
+            border: 1px solid #555555;
+            selection-background-color: #505050;
+            color: #ffffff;
+        }
+        QLabel {
+            color: #ffffff;
+        }
+        QLineEdit {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QLineEdit:focus {
+            border: 1px solid #4a9eff;
+        }
+        QSpinBox {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QSpinBox:focus {
+            border: 1px solid #4a9eff;
+        }
+        QCheckBox {
+            color: #ffffff;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+        }
+        QCheckBox::indicator:unchecked {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 3px;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #4a9eff;
+            border: 1px solid #4a9eff;
+            border-radius: 3px;
+        }
+        QTabWidget::pane {
+            border: 1px solid #555555;
+            background-color: #2b2b2b;
+        }
+        QTabBar::tab {
+            background-color: #404040;
+            border: 1px solid #555555;
+            padding: 8px 16px;
+            color: #ffffff;
+        }
+        QTabBar::tab:selected {
+            background-color: #505050;
+        }
+        QTabBar::tab:hover {
+            background-color: #4a4a4a;
+        }
+        QGroupBox {
+            color: #ffffff;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        """
+        self.setStyleSheet(dark_style)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle('MJNL')
+        self.setWindowTitle('MJNL v1.2.2')
         self.resize(300, 200)
         self.centralwidget = QWidget(self)
 
@@ -264,9 +543,19 @@ class MainWindow(QMainWindow):
         self.time_label = QLabel(self.centralwidget)
         self.time_label.setVisible(False)
 
-        # Кнопка запуска игры
+        # Кнопки
         self.start_button = QPushButton('Play', self.centralwidget)
         self.start_button.clicked.connect(self.launch_game)
+        
+        self.settings_button = QPushButton('⚙️', self.centralwidget)
+        self.settings_button.setFixedWidth(40)
+        self.settings_button.setToolTip('Настройки')
+        self.settings_button.clicked.connect(self.open_settings)
+        
+        # Лэйаут для кнопок
+        self.buttons_layout = QHBoxLayout()
+        self.buttons_layout.addWidget(self.start_button, 4)
+        self.buttons_layout.addWidget(self.settings_button, 1)
 
         # Основной вертикальный лэйаут
         layout = QVBoxLayout(self.centralwidget)
@@ -278,14 +567,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.start_progress_label)
         layout.addWidget(self.start_progress)
         layout.addWidget(self.time_label)
-        layout.addWidget(self.start_button)
+        layout.addLayout(self.buttons_layout)
 
         self.setCentralWidget(self.centralwidget)
 
         self.load_accounts()
         self.load_config()
+        self.load_settings()
         self.load_versions()
 
+        # Инициализация системного трея
+        self.init_system_tray()
+        
         # Поток для запуска игры
         self.launch_thread = LaunchThread()
         self.launch_thread.state_update_signal.connect(self.state_update)
@@ -407,11 +700,18 @@ class MainWindow(QMainWindow):
             display_name = f"{status_icon} {vid}"
             self.version_select.addItem(display_name)
             
-            # В онлайне добавляем «виртуальные» записи: только fabric (если поддерживается)
+            # В онлайне добавляем «виртуальные» записи: fabric и quilt (если поддерживается)
             if not getattr(self, 'offline_mode', False):
-                if self.is_fabric_supported_for(vid):
+                if self.is_modloader_supported_for(vid, 'fabric'):
                     fabric_display = f"{status_icon} {vid} fabric"
                     self.version_select.addItem(fabric_display)
+                
+                # Добавляем Quilt только если включена поддержка в настройках
+                if (hasattr(self, 'settings') and 
+                    self.settings.get('quilt_support', False) and
+                    self.is_modloader_supported_for(vid, 'quilt')):
+                    quilt_display = f"{status_icon} {vid} quilt"
+                    self.version_select.addItem(quilt_display)
 
         # Восстанавливаем выбор, если возможно
         if previous_selection:
@@ -431,8 +731,8 @@ class MainWindow(QMainWindow):
         version_json = os.path.join(version_dir, f"{version_id}.json")
         return os.path.isdir(version_dir) and os.path.isfile(version_json)
 
-    def is_fabric_supported_for(self, mc_version: str) -> bool:
-        # Грубая эвристика: Fabric официально поддерживает 1.14+; более точно можно опросить fabric-meta
+    def is_modloader_supported_for(self, mc_version: str, loader: str) -> bool:
+        # Грубая эвристика: Fabric и Quilt официально поддерживают 1.14+; более точно можно опросить meta
         try:
             parts = mc_version.split('.')
             # Ожидаем формат X.Y[.Z]
@@ -441,6 +741,10 @@ class MainWindow(QMainWindow):
             return (major > 1) or (major == 1 and minor >= 14)
         except Exception:
             return False
+    
+    def is_fabric_supported_for(self, mc_version: str) -> bool:
+        """Обратная совместимость"""
+        return self.is_modloader_supported_for(mc_version, 'fabric')
 
     def get_installed_versions(self):
         versions_dir = os.path.join(minecraft_directory, 'versions')
@@ -533,6 +837,301 @@ class MainWindow(QMainWindow):
 
     def show_message(self, title: str, text: str):
         QMessageBox.information(self, title, text)
+    
+    def load_settings(self):
+        """Загружает настройки приложения"""
+        self.settings = {}
+        try:
+            settings_path = os.path.join(
+                os.getenv('APPDATA'), '.MjnLauncher', 'client', 'settings.json'
+            )
+            if os.path.exists(settings_path):
+                with open(settings_path, 'r', encoding='utf-8') as f:
+                    self.settings = json.load(f)
+        except Exception:
+            self.settings = {}
+        
+        # Применяем настройки
+        self.apply_settings()
+    
+    def apply_settings(self):
+        """Применяет загруженные настройки"""
+        # Размер окна
+        window_size = self.settings.get('window_size', '300x200')
+        if 'x' in window_size:
+            width, height = map(int, window_size.split('x'))
+            self.resize(width, height)
+        
+        # Темная тема
+        if self.settings.get('dark_theme', False):
+            self.apply_dark_theme()
+        else:
+            self.apply_light_theme()
+        
+        # Обновляем меню трея при изменении настроек
+        if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            self.create_tray_menu()
+    
+    def apply_dark_theme(self):
+        """Применяет темную тему"""
+        dark_style = """
+        * {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QMainWindow {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QWidget {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QPushButton {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 6px;
+            color: #ffffff;
+        }
+        QPushButton:hover {
+            background-color: #505050;
+        }
+        QPushButton:pressed {
+            background-color: #353535;
+        }
+        QPushButton:disabled {
+            background-color: #2a2a2a;
+            color: #666666;
+        }
+        QComboBox {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QComboBox:hover {
+            background-color: #505050;
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid #ffffff;
+            margin-right: 5px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #404040;
+            border: 1px solid #555555;
+            selection-background-color: #505050;
+            color: #ffffff;
+        }
+        QProgressBar {
+            border: 1px solid #555555;
+            border-radius: 4px;
+            text-align: center;
+            background-color: #2a2a2a;
+            color: #ffffff;
+        }
+        QProgressBar::chunk {
+            background-color: #4a9eff;
+            border-radius: 3px;
+        }
+        QLabel {
+            color: #ffffff;
+        }
+        QLineEdit {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QLineEdit:focus {
+            border: 1px solid #4a9eff;
+        }
+        QSpinBox {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QSpinBox:focus {
+            border: 1px solid #4a9eff;
+        }
+        QCheckBox {
+            color: #ffffff;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+        }
+        QCheckBox::indicator:unchecked {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 3px;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #4a9eff;
+            border: 1px solid #4a9eff;
+            border-radius: 3px;
+        }
+        QTabWidget::pane {
+            border: 1px solid #555555;
+            background-color: #2b2b2b;
+        }
+        QTabBar::tab {
+            background-color: #404040;
+            border: 1px solid #555555;
+            padding: 8px 16px;
+            color: #ffffff;
+        }
+        QTabBar::tab:selected {
+            background-color: #505050;
+        }
+        QTabBar::tab:hover {
+            background-color: #4a4a4a;
+        }
+        QGroupBox {
+            color: #ffffff;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        """
+        self.setStyleSheet(dark_style)
+        # Применяем стили ко всем дочерним элементам
+        self.centralwidget.setStyleSheet(dark_style)
+    
+    def apply_light_theme(self):
+        """Применяет светлую тему (сброс стилей)"""
+        self.setStyleSheet("")
+        self.centralwidget.setStyleSheet("")
+    
+    def open_settings(self):
+        """Открывает окно настроек"""
+        dialog = SettingsDialog(self)
+        if dialog.exec_() == QDialog.Accepted:
+            if dialog.save_settings():
+                # Перезагружаем настройки
+                self.load_settings()
+                QMessageBox.information(self, "Настройки", "Настройки сохранены успешно!")
+            else:
+                QMessageBox.warning(self, "Ошибка", "Не удалось сохранить настройки.")
+    
+    def init_system_tray(self):
+        """Инициализирует системный трей"""
+        # Проверяем, поддерживается ли системный трей
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        
+        # Создаем иконку для трея
+        self.tray_icon = QSystemTrayIcon(self)
+        
+        # Загружаем иконку (используем первую доступную)
+        icon_path = "assets/2.ico"
+        if os.path.exists(icon_path):
+            self.tray_icon.setIcon(QIcon(icon_path))
+        else:
+            # Если иконка не найдена, используем стандартную
+            self.tray_icon.setIcon(self.style().standardIcon(self.style().SP_ComputerIcon))
+        
+        # Создаем контекстное меню для трея
+        self.create_tray_menu()
+        
+        # Подключаем сигналы
+        self.tray_icon.activated.connect(self.tray_icon_activated)
+        
+        # Показываем трей
+        self.tray_icon.show()
+        
+        # Устанавливаем подсказку
+        self.tray_icon.setToolTip("MJNL - MojNovyLauncher")
+    
+    def create_tray_menu(self):
+        """Создает контекстное меню для системного трея"""
+        tray_menu = QMenu()
+        
+        # Показать/скрыть
+        self.show_action = QAction("Показать", self)
+        self.show_action.triggered.connect(self.show_window)
+        tray_menu.addAction(self.show_action)
+        
+        # Запустить игру
+        self.launch_action = QAction("Запустить игру", self)
+        self.launch_action.triggered.connect(self.launch_game)
+        tray_menu.addAction(self.launch_action)
+        
+        tray_menu.addSeparator()
+        
+        # Настройки
+        settings_action = QAction("Настройки", self)
+        settings_action.triggered.connect(self.open_settings)
+        tray_menu.addAction(settings_action)
+        
+        tray_menu.addSeparator()
+        
+        # Выход
+        quit_action = QAction("Выход", self)
+        quit_action.triggered.connect(self.quit_application)
+        tray_menu.addAction(quit_action)
+        
+        self.tray_icon.setContextMenu(tray_menu)
+    
+    def tray_icon_activated(self, reason):
+        """Обработчик активации иконки в трее"""
+        if reason == QSystemTrayIcon.DoubleClick:
+            self.show_window()
+    
+    def show_window(self):
+        """Показывает главное окно"""
+        self.show()
+        self.raise_()
+        self.activateWindow()
+    
+    def hide_to_tray(self):
+        """Сворачивает окно в трей"""
+        if hasattr(self, 'tray_icon') and self.tray_icon.isVisible():
+            self.hide()
+            self.tray_icon.showMessage(
+                "MJNL",
+                "Лаунчер свернут в системный трей",
+                QSystemTrayIcon.Information,
+                2000
+            )
+    
+    def quit_application(self):
+        """Выход из приложения"""
+        if hasattr(self, 'tray_icon'):
+            self.tray_icon.hide()
+        QApplication.quit()
+    
+    def closeEvent(self, event):
+        """Обработчик закрытия окна"""
+        # Проверяем настройку "сворачивать в трей"
+        if (hasattr(self, 'settings') and 
+            self.settings.get('minimize_to_tray', False) and
+            hasattr(self, 'tray_icon') and 
+            self.tray_icon.isVisible()):
+            
+            self.hide_to_tray()
+            event.ignore()
+        else:
+            # Обычное закрытие
+            if hasattr(self, 'tray_icon'):
+                self.tray_icon.hide()
+            event.accept()
 
 
 if __name__ == '__main__':
@@ -541,3 +1140,5 @@ if __name__ == '__main__':
     window = MainWindow()
     window.show()
     exit(app.exec_())
+
+
