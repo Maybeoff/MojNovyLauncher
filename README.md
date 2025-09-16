@@ -1,4 +1,4 @@
-## MojNovyLauncher (MJNL) v1.2.2
+## MojNovyLauncher (MJNL) v1.2.3.4
 
 Лёгкий оффлайн-лаунчер Minecraft на PyQt5 с установкой и запуском версий через `minecraft_launcher_lib`.
 
@@ -18,7 +18,7 @@
 
 ### Установка зависимостей
 ```bash
-pip install PyQt5 minecraft_launcher_lib
+pip install PyQt5 minecraft_launcher_lib markdown
 ```
 
 ### Запуск

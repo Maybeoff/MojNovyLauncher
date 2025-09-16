@@ -10,8 +10,86 @@ from PyQt5.QtWidgets import (
     QPushButton, QApplication, QMainWindow, QHBoxLayout,
     QInputDialog, QMessageBox, QDialog, QFormLayout,
     QLineEdit, QSpinBox, QCheckBox, QGroupBox, QTabWidget,
-    QSystemTrayIcon, QMenu, QAction
+    QSystemTrayIcon, QMenu, QAction, QTextBrowser, QListWidget, QListWidgetItem
 )
+import requests
+try:
+    import markdown as md  # type: ignore
+except Exception:
+    md = None
+import re
+import html as htmllib
+
+def markdown_to_html_simple(source: str) -> str:
+    # Escape base HTML
+    text = htmllib.escape(source)
+    # Preserve newlines
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Code blocks ```...```
+    def repl_codeblock(match):
+        code = match.group(1)
+        return f"</p><pre><code>{code}</code></pre><p>"
+    text = re.sub(r"```[\s\S]*?```", lambda m: repl_codeblock(re.match(r"```[\s\S]*?\n?([\s\S]*?)\n?```", m.group(0)) or m), text)
+
+    # Headings
+    text = re.sub(r"^######\s+(.*)$", r"<h6>\1</h6>", text, flags=re.MULTILINE)
+    text = re.sub(r"^#####\s+(.*)$", r"<h5>\1</h5>", text, flags=re.MULTILINE)
+    text = re.sub(r"^####\s+(.*)$", r"<h4>\1</h4>", text, flags=re.MULTILINE)
+    text = re.sub(r"^###\s+(.*)$", r"<h3>\1</h3>", text, flags=re.MULTILINE)
+    text = re.sub(r"^##\s+(.*)$", r"<h2>\1</h2>", text, flags=re.MULTILINE)
+    text = re.sub(r"^#\s+(.*)$", r"<h1>\1</h1>", text, flags=re.MULTILINE)
+
+    # Lists: group consecutive -/* lines into <ul>
+    lines = text.split('\n')
+    out = []
+    in_ul = False
+    for line in lines:
+        if re.match(r"^\s*[-*+]\s+", line):
+            if not in_ul:
+                out.append("<ul>")
+                in_ul = True
+            item = re.sub(r"^\s*[-*+]\s+", "", line)
+            out.append(f"<li>{item}</li>")
+        else:
+            if in_ul:
+                out.append("</ul>")
+                in_ul = False
+            out.append(line)
+    if in_ul:
+        out.append("</ul>")
+    text = "\n".join(out)
+
+    # Bold/italic/inline code
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+
+    # Links [text](url)
+    text = re.sub(r"\[([^\]]+)\]\(([^\)]+)\)", r"<a href='\2'>\1</a>", text)
+
+    # Paragraphs: wrap remaining non-tag lines
+    def wrap_paragraphs(s: str) -> str:
+        result = []
+        for block in s.split('\n\n'):
+            if re.search(r"^\s*<", block):
+                result.append(block)
+            else:
+                if block.strip():
+                    result.append(f"<p>{block}</p>")
+        return "\n".join(result)
+    text = wrap_paragraphs(text)
+
+    style = (
+        '<style>body{font-family:Segoe UI,Arial; font-size:12px;}'
+        'h1,h2,h3{margin:6px 0;}'
+        'ul{margin:6px 0 6px 18px;}'
+        'code, pre{background:#2a2a2a; color:#ddd;}'
+        'code{padding:2px 4px;}'
+        'pre{padding:8px; overflow:auto;}'
+        'a{color:#4a9eff;}</style>'
+    )
+    return f"<html><head><meta charset='utf-8'>{style}</head><body>{text}</body></html>"
 
 from minecraft_launcher_lib.utils import get_minecraft_directory, get_version_list
 from minecraft_launcher_lib.install import install_minecraft_version
@@ -500,74 +578,142 @@ class MainWindow(QMainWindow):
             os.getenv('APPDATA'), '.MjnLauncher', 'client', 'config.json'
         )
 
-        # Логотип
+        # Верхний баннер
         self.logo = QLabel(self.centralwidget)
         self.logo.setMaximumSize(QSize(256, 37))
         self.logo.setPixmap(QPixmap('assets/title.png'))
         self.logo.setScaledContents(True)
 
-        # Список аккаунтов и кнопка добавления
+        # ПРАВАЯ БОКОВАЯ ПАНЕЛЬ (аккаунт/настройки)
         self.account_type = QComboBox(self.centralwidget)
         self.add_account_button = QPushButton("+", self.centralwidget)
         self.add_account_button.setFixedWidth(30)
         self.add_account_button.clicked.connect(self.add_account)
 
-        self.account_layout = QHBoxLayout()
-        self.account_layout.addWidget(self.account_type, 4)
-        self.account_layout.addWidget(self.add_account_button, 1)
+        right_panel = QVBoxLayout()
+        right_panel.addWidget(QLabel('Аккаунт:', self.centralwidget))
+        account_row = QHBoxLayout()
+        account_row.addWidget(self.account_type, 4)
+        account_row.addWidget(self.add_account_button, 1)
+        right_panel.addLayout(account_row)
 
-        # Список версий Minecraft
-        self.version_filter = QComboBox(self.centralwidget)
-        self.version_filter.addItems(['Релизы', 'Снапшоты', 'Все'])
-        self.version_filter.currentIndexChanged.connect(self.on_version_filter_changed)
-
-        # Кнопка обновления списка версий
-        self.refresh_versions_button = QPushButton("🔄 Обновить", self.centralwidget)
-        self.refresh_versions_button.clicked.connect(self.refresh_versions)
-        
-        # Лэйаут для фильтра и кнопки обновления
-        self.version_layout = QHBoxLayout()
-        self.version_layout.addWidget(self.version_filter, 3)
-        self.version_layout.addWidget(self.refresh_versions_button, 1)
-
-        self.version_select = QComboBox(self.centralwidget)
-        self.all_versions = []
-        self.offline_mode = False
-
-        # Прогресс-бар и метка
-        self.start_progress_label = QLabel(self.centralwidget)
-        self.start_progress_label.setVisible(False)
-        self.start_progress = QProgressBar(self.centralwidget)
-        self.start_progress.setVisible(False)
-
-        self.time_label = QLabel(self.centralwidget)
-        self.time_label.setVisible(False)
-
-        # Кнопки
-        self.start_button = QPushButton('Play', self.centralwidget)
-        self.start_button.clicked.connect(self.launch_game)
-        
         self.settings_button = QPushButton('⚙️', self.centralwidget)
         self.settings_button.setFixedWidth(40)
         self.settings_button.setToolTip('Настройки')
         self.settings_button.clicked.connect(self.open_settings)
-        
-        # Лэйаут для кнопок
-        self.buttons_layout = QHBoxLayout()
-        self.buttons_layout.addWidget(self.start_button, 4)
-        self.buttons_layout.addWidget(self.settings_button, 1)
+        right_panel.addWidget(self.settings_button, 0, Qt.AlignRight)
+        right_panel.addStretch(1)
 
-        # Основной вертикальный лэйаут
+        # ЦЕНТРАЛЬНЫЕ ВКЛАДКИ (Legacy-стиль)
+        self.center_tabs = QTabWidget(self.centralwidget)
+        news_tab = QWidget()
+        news_layout = QVBoxLayout(news_tab)
+        self.news_view = QTextBrowser(news_tab)
+        self.news_view.setOpenExternalLinks(True)
+        news_controls = QHBoxLayout()
+        self.news_refresh_btn = QPushButton('Обновить новости', news_tab)
+        self.news_refresh_btn.clicked.connect(self.load_news)
+        news_controls.addWidget(self.news_refresh_btn)
+        news_layout.addLayout(news_controls)
+        news_layout.addWidget(self.news_view)
+        self.center_tabs.addTab(news_tab, 'Новости')
+
+        mods_tab = QWidget()
+        mods_layout = QVBoxLayout(mods_tab)
+        # Поиск модов
+        mods_search_row = QHBoxLayout()
+        self.mods_search_edit = QLineEdit(mods_tab)
+        self.mods_search_edit.setPlaceholderText('Поиск модов Modrinth...')
+        self.mods_search_btn = QPushButton('Искать', mods_tab)
+        self.mods_search_btn.clicked.connect(self.on_mods_search)
+        self.mods_search_edit.returnPressed.connect(self.on_mods_search)
+        mods_search_row.addWidget(self.mods_search_edit, 4)
+        mods_search_row.addWidget(self.mods_search_btn, 1)
+        mods_layout.addLayout(mods_search_row)
+
+        # Фильтры: Loader и MC версия из выбранной версии лаунчера
+        mods_filter_row = QHBoxLayout()
+        self.mods_loader_combo = QComboBox(mods_tab)
+        self.mods_loader_combo.addItems(['auto', 'fabric', 'quilt', 'forge'])
+        self.mods_gamever_combo = QComboBox(mods_tab)
+        self.mods_gamever_combo.setEditable(True)
+        self.mods_gamever_combo.setPlaceholderText('auto')
+        mods_filter_row.addWidget(QLabel('Загрузчик:', mods_tab))
+        mods_filter_row.addWidget(self.mods_loader_combo)
+        mods_filter_row.addWidget(QLabel('MC версия:', mods_tab))
+        mods_filter_row.addWidget(self.mods_gamever_combo)
+        mods_layout.addLayout(mods_filter_row)
+
+        # Список результатов
+        self.mods_results = QListWidget(mods_tab)
+        mods_layout.addWidget(self.mods_results)
+
+        # Действия
+        mods_actions = QHBoxLayout()
+        self.mods_download_btn = QPushButton('Скачать выбранный мод', mods_tab)
+        self.mods_download_btn.clicked.connect(self.on_mod_download)
+        mods_actions.addStretch(1)
+        mods_actions.addWidget(self.mods_download_btn)
+        mods_layout.addLayout(mods_actions)
+
+        self.center_tabs.addTab(mods_tab, 'Моды')
+
+        console_tab = QWidget()
+        console_layout = QVBoxLayout(console_tab)
+        console_layout.addWidget(QLabel('Консоль (скоро)', console_tab))
+        self.center_tabs.addTab(console_tab, 'Консоль')
+
+        # Список версий и фильтр (нижняя панель)
+        self.version_filter = QComboBox(self.centralwidget)
+        self.version_filter.addItems(['Релизы', 'Снапшоты', 'Все'])
+        self.version_filter.currentIndexChanged.connect(self.on_version_filter_changed)
+
+        self.refresh_versions_button = QPushButton("🔄 Обновить", self.centralwidget)
+        self.refresh_versions_button.clicked.connect(self.refresh_versions)
+
+        bottom_filter_row = QHBoxLayout()
+        bottom_filter_row.addWidget(self.version_filter, 2)
+        bottom_filter_row.addWidget(self.refresh_versions_button, 1)
+
+        self.version_select = QComboBox(self.centralwidget)
+        # Синхронизация выбора версии с фильтрами во вкладке модов
+        self.version_select.currentIndexChanged.connect(self.set_mods_filters_from_selected)
+        self.all_versions = []
+        self.offline_mode = False
+
+        # Прогресс и статус (нижняя панель)
+        self.start_progress_label = QLabel(self.centralwidget)
+        self.start_progress_label.setVisible(False)
+        self.start_progress = QProgressBar(self.centralwidget)
+        self.start_progress.setVisible(False)
+        self.time_label = QLabel(self.centralwidget)
+        self.time_label.setVisible(False)
+
+        # Нижняя панель управления
+        self.start_button = QPushButton('Play', self.centralwidget)
+        self.start_button.clicked.connect(self.launch_game)
+
+        bottom_controls = QHBoxLayout()
+        bottom_controls.addWidget(self.version_select, 5)
+        bottom_controls.addWidget(self.start_button, 1)
+
+        # Центральная область: вкладки слева и правая панель
+        center_row = QHBoxLayout()
+        center_row.addWidget(self.center_tabs, 4)
+        right_container = QWidget(self.centralwidget)
+        right_container.setLayout(right_panel)
+        center_row.addWidget(right_container, 1)
+
+        # Главный лэйаут
         layout = QVBoxLayout(self.centralwidget)
         layout.setContentsMargins(15, 15, 15, 15)
         layout.addWidget(self.logo, alignment=Qt.AlignHCenter)
-        layout.addLayout(self.account_layout)
-        layout.addLayout(self.version_layout)
-        layout.addWidget(self.version_select)
+        layout.addLayout(center_row)
+        layout.addLayout(bottom_filter_row)
         layout.addWidget(self.start_progress_label)
         layout.addWidget(self.start_progress)
         layout.addWidget(self.time_label)
-        layout.addLayout(self.buttons_layout)
+        layout.addLayout(bottom_controls)
 
         self.setCentralWidget(self.centralwidget)
 
@@ -575,6 +721,16 @@ class MainWindow(QMainWindow):
         self.load_config()
         self.load_settings()
         self.load_versions()
+        # Загрузка новостей при старте (без падения при ошибке)
+        try:
+            self.load_news()
+        except Exception:
+            pass
+        # Инициализируем список версий для фильтра модов
+        try:
+            self.populate_mods_game_versions()
+        except Exception:
+            pass
 
         # Инициализация системного трея
         self.init_system_tray()
@@ -584,6 +740,215 @@ class MainWindow(QMainWindow):
         self.launch_thread.state_update_signal.connect(self.state_update)
         self.launch_thread.progress_update_signal.connect(self.update_progress)
         self.launch_thread.message_signal.connect(self.show_message)
+
+    def load_news(self):
+        url = 'https://raw.githubusercontent.com/Maybeoff/MojNovyLauncher/main/README.md'
+        try:
+            headers = {
+                'User-Agent': 'MojNovyLauncher/1.2 (news-fetch)'
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            content = resp.text
+            if md is not None:
+                html = md.markdown(content, extensions=['extra', 'sane_lists'])
+                html_wrapped = (
+                    '<html><head><meta charset="utf-8">'
+                    '<style>body{font-family:Segoe UI,Arial; font-size:12px;}'
+                    'h1,h2,h3{margin:6px 0;}'
+                    'ul{margin:6px 0 6px 18px;}'
+                    'code, pre{background:#2a2a2a; color:#ddd;}'
+                    'code{padding:2px 4px;}'
+                    'pre{padding:8px; overflow:auto;}'
+                    'a{color:#4a9eff;}</style></head><body>'
+                    + html + '</body></html>'
+                )
+                self.news_view.setHtml(html_wrapped)
+            else:
+                self.news_view.setHtml(markdown_to_html_simple(content))
+        except Exception as e:
+            self.news_view.setPlainText(f"Не удалось загрузить новости.\n{str(e)}")
+
+    # ===== Modrinth helpers =====
+    def get_user_agent(self) -> str:
+        return 'MojNovyLauncher/1.2 (mods)'
+
+    def infer_selected_mc_and_loader(self) -> tuple:
+        # Возвращает (mc_version, loader) из выбранной версии в лаунчере
+        display_text = self.version_select.currentText()
+        clean = display_text.replace('✅ ', '').replace('⬇️ ', '').strip()
+        parts = clean.split()
+        if len(parts) >= 2 and parts[-1].lower() in {'fabric', 'quilt', 'forge'}:
+            return (' '.join(parts[:-1]), parts[-1].lower())
+        return (clean, 'auto')
+
+    def set_mods_filters_from_selected(self):
+        try:
+            mc, loader = self.infer_selected_mc_and_loader()
+            # Версия MC
+            if hasattr(self, 'mods_gamever_combo'):
+                if mc and self.mods_gamever_combo.findText(mc) >= 0:
+                    self.mods_gamever_combo.setCurrentText(mc)
+                elif mc:
+                    # Если версии нет в списке – просто установить текст
+                    self.mods_gamever_combo.setCurrentText(mc)
+            # Лоадер
+            if hasattr(self, 'mods_loader_combo'):
+                if loader in {'fabric', 'quilt', 'forge'}:
+                    idx = self.mods_loader_combo.findText(loader)
+                    if idx >= 0:
+                        self.mods_loader_combo.setCurrentIndex(idx)
+                else:
+                    idx = self.mods_loader_combo.findText('auto')
+                    if idx >= 0:
+                        self.mods_loader_combo.setCurrentIndex(idx)
+        except Exception:
+            pass
+
+    def populate_mods_game_versions(self):
+        # Заполняем выпадающий список версий с учетом фильтра (Релизы/Снапшоты/Все)
+        seen = set()
+        self.mods_gamever_combo.clear()
+        self.mods_gamever_combo.addItem('auto')
+        versions = self.all_versions
+        try:
+            if not getattr(self, 'offline_mode', False):
+                mode = self.version_filter.currentText()
+                if mode == 'Релизы':
+                    allowed_types = {'release'}
+                elif mode == 'Снапшоты':
+                    allowed_types = {'snapshot'}
+                else:
+                    allowed_types = None
+                if allowed_types is not None:
+                    versions = [v for v in versions if v.get('type') in allowed_types]
+        except Exception:
+            pass
+        for v in versions:
+            vid = v.get('id') if isinstance(v, dict) else None
+            if vid and vid not in seen:
+                self.mods_gamever_combo.addItem(vid)
+                seen.add(vid)
+        # Предзаполним из выбранной версии
+        mc, _ = self.infer_selected_mc_and_loader()
+        if mc and self.mods_gamever_combo.findText(mc) >= 0:
+            self.mods_gamever_combo.setCurrentText(mc)
+
+    def on_mods_search(self):
+        query = self.mods_search_edit.text().strip()
+        self.mods_results.clear()
+        try:
+            headers = {
+                'User-Agent': self.get_user_agent()
+            }
+            # Фасеты: project_type=mod, loaders/game_versions если заданы
+            facets = [["project_type:mod"]]
+            loader = self.mods_loader_combo.currentText()
+            if loader and loader != 'auto':
+                # Поиск по Modrinth использует loader как категорию
+                facets.append([f"categories:{loader}"])
+            game_ver = self.mods_gamever_combo.currentText().strip()
+            if game_ver and game_ver != 'auto':
+                facets.append([f"versions:{game_ver}"])
+            params = {
+                'query': query if query else '',
+                'limit': 20,
+                'facets': json.dumps(facets, ensure_ascii=False)
+            }
+            resp = requests.get('https://api.modrinth.com/v2/search', params=params, headers=headers, timeout=12)
+            resp.raise_for_status()
+            data = resp.json()
+            hits = data.get('hits', [])
+            for hit in hits:
+                title = hit.get('title') or hit.get('project_id') or 'Untitled'
+                desc = hit.get('description') or ''
+                pid = hit.get('project_id')
+                item = QListWidgetItem(f"{title} — {desc[:80]}")
+                item.setData(Qt.UserRole, {'project_id': pid})
+                self.mods_results.addItem(item)
+            if not hits:
+                self.mods_results.addItem(QListWidgetItem('Ничего не найдено'))
+        except Exception as e:
+            QMessageBox.warning(self, 'Ошибка поиска', f"{type(e).__name__}: {e}")
+
+    def on_mod_download(self):
+        item = self.mods_results.currentItem()
+        if not item:
+            QMessageBox.warning(self, 'Моды', 'Выберите мод из списка.')
+            return
+        payload = item.data(Qt.UserRole)
+        if not isinstance(payload, dict) or 'project_id' not in payload:
+            QMessageBox.warning(self, 'Моды', 'Элемент не содержит данных проекта.')
+            return
+        project_id = payload['project_id']
+        # Определяем таргет: выбранная версия/лоадер
+        mc_ver, loader = self.infer_selected_mc_and_loader()
+        if loader == 'auto':
+            loader = self.mods_loader_combo.currentText() or 'fabric'
+            if loader == 'auto':
+                loader = 'fabric'
+        try:
+            headers = {'User-Agent': self.get_user_agent()}
+            # Получаем список версий проекта и выбираем подходящую по game_versions+loaders
+            url = f'https://api.modrinth.com/v2/project/{project_id}/version'
+            resp = requests.get(url, headers=headers, timeout=12)
+            resp.raise_for_status()
+            versions = resp.json() or []
+            selected_version = None
+            for v in versions:
+                gv = v.get('game_versions') or []
+                loaders = v.get('loaders') or []
+                if (not mc_ver or mc_ver in gv) and (loader in loaders):
+                    selected_version = v
+                    break
+            if not selected_version and versions:
+                selected_version = versions[0]
+            if not selected_version:
+                QMessageBox.warning(self, 'Моды', 'Не удалось подобрать версию мода для этой версии Minecraft.')
+                return
+            # Скачиваем первый файл из версии
+            files = selected_version.get('files') or []
+            primary = None
+            for f in files:
+                if f.get('primary'):
+                    primary = f
+                    break
+            if not primary and files:
+                primary = files[0]
+            if not primary:
+                QMessageBox.warning(self, 'Моды', 'В выбранной версии мода нет файлов для скачивания.')
+                return
+            url = primary.get('url') or primary.get('downloads', [None])[0]
+            if not url:
+                QMessageBox.warning(self, 'Моды', 'Не найден URL файла мода.')
+                return
+            # Путь mods: всегда используем папку профиля выбранной версии
+            _, sel_loader = self.infer_selected_mc_and_loader()
+            if sel_loader in {'fabric', 'quilt', 'forge'}:
+                profile_name = f"{mc_ver}-{sel_loader}"
+            else:
+                # Для ванильной версии создаем отдельный профиль по названию версии
+                profile_name = mc_ver
+            game_dir = os.path.join(minecraft_directory, 'profiles', profile_name)
+            try:
+                os.makedirs(game_dir, exist_ok=True)
+                for sub in ['mods', 'config', 'resourcepacks']:
+                    os.makedirs(os.path.join(game_dir, sub), exist_ok=True)
+            except Exception:
+                pass
+            mods_dir = os.path.join(game_dir, 'mods')
+            os.makedirs(mods_dir, exist_ok=True)
+            filename = primary.get('filename') or os.path.basename(url)
+            target = os.path.join(mods_dir, filename)
+            with requests.get(url, headers=headers, timeout=30, stream=True) as r:
+                r.raise_for_status()
+                with open(target, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+            QMessageBox.information(self, 'Моды', f'Мод скачан: {target}')
+        except Exception as e:
+            QMessageBox.warning(self, 'Ошибка скачивания', str(e))
 
     def load_accounts(self):
         self.account_type.clear()
@@ -661,6 +1026,12 @@ class MainWindow(QMainWindow):
         
         # Отмечаем, что первая загрузка завершена
         self._first_load_done = True
+        # Обновляем фильтры модов под текущий выбор и перечень версий
+        try:
+            self.populate_mods_game_versions()
+            self.set_mods_filters_from_selected()
+        except Exception:
+            pass
 
     def apply_version_filter(self):
         # Сохраняем текущий выбор, чтобы попытаться восстановить после фильтрации
@@ -724,6 +1095,12 @@ class MainWindow(QMainWindow):
                     self.version_select.setCurrentIndex(i)
                     break
         self.version_select.blockSignals(False)
+        # После изменения списка – синхронизируем фильтры модов
+        try:
+            self.populate_mods_game_versions()
+            self.set_mods_filters_from_selected()
+        except Exception:
+            pass
 
     def is_version_installed(self, version_id: str) -> bool:
         """Проверяет, установлена ли версия локально"""
@@ -767,6 +1144,11 @@ class MainWindow(QMainWindow):
     def on_version_filter_changed(self):
         self.apply_version_filter()
         self.save_config()
+        try:
+            self.populate_mods_game_versions()
+            self.set_mods_filters_from_selected()
+        except Exception:
+            pass
 
     def save_config(self):
         cfg = dict(self._config) if hasattr(self, '_config') else {}
