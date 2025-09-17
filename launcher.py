@@ -3,8 +3,8 @@ import json
 from subprocess import call, Popen, PIPE, STDOUT
 from sys import argv, exit
 
-from PyQt5.QtCore import QThread, pyqtSignal, QSize, Qt
-from PyQt5.QtGui import QPixmap, QIcon
+from PyQt5.QtCore import QThread, pyqtSignal, QSize, Qt, QUrl
+from PyQt5.QtGui import QPixmap, QIcon, QDesktopServices
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QComboBox, QProgressBar,
     QPushButton, QApplication, QMainWindow, QHBoxLayout,
@@ -13,6 +13,8 @@ from PyQt5.QtWidgets import (
     QSystemTrayIcon, QMenu, QAction, QTextBrowser, QListWidget, QListWidgetItem
 )
 import requests
+import shutil # Добавляем импорт для работы с файлами и директориями
+import zipfile # Добавляем импорт для работы с zip-архивами
 try:
     import markdown as md  # type: ignore
 except Exception:
@@ -94,6 +96,66 @@ def markdown_to_html_simple(source: str) -> str:
 from minecraft_launcher_lib.utils import get_minecraft_directory, get_version_list
 from minecraft_launcher_lib.install import install_minecraft_version
 from minecraft_launcher_lib.command import get_minecraft_command
+try:
+    # В новых версиях библиотека экспортирует модуль через корневой пакет
+    from minecraft_launcher_lib import microsoft_account as _ms_account  # type: ignore
+    login_with_microsoft = getattr(_ms_account, 'login_with_microsoft', None)
+    if login_with_microsoft is None:
+        raise ImportError('login_with_microsoft not found')
+except Exception:
+    try:
+        # Обратная совместимость со старыми версиями
+        from minecraft_launcher_lib.microsoft_account import login_with_microsoft  # type: ignore
+    except Exception:
+        login_with_microsoft = None
+
+def _check_microsoft_prereqs() -> tuple:
+    """Возвращает (ok, message). Проверяет наличие зависимостей для Microsoft-логина."""
+    try:
+        import msal  # type: ignore
+        _ = msal
+    except Exception:
+        return (False, 'Не найден модуль msal. Установите: pip install msal')
+    if login_with_microsoft is None:
+        return (False, 'Не найден login_with_microsoft из minecraft_launcher_lib. Обновите библиотеку: pip install -U minecraft-launcher-lib')
+    return (True, '')
+
+def _ms_login(token_directory: str):
+    """Совместимый вызов логина Microsoft для разных версий minecraft-launcher-lib.
+    Возвращает dict с полями как минимум name/id/access_token или бросает исключение.
+    """
+    # Пытаемся разные имена функций и сигнатуры
+    candidates = []
+    try:
+        from minecraft_launcher_lib import microsoft_account as _m
+        # Приоритетные варианты имён
+        for name in (
+            'login_with_microsoft',  # современное имя
+            'login',                 # альтернативное имя
+            'login_microsoft',       # редкие форки
+        ):
+            fn = getattr(_m, name, None)
+            if callable(fn):
+                candidates.append(fn)
+    except Exception:
+        pass
+    if not candidates:
+        raise RuntimeError('В установленной minecraft-launcher-lib нет функции логина Microsoft')
+    last_exc = None
+    for fn in candidates:
+        try:
+            # Наиболее частая сигнатура
+            return fn(client_id='00000000402b5328', token_directory=token_directory)
+        except TypeError:
+            try:
+                return fn(token_directory)
+            except Exception as e:
+                last_exc = e
+        except Exception as e:
+            last_exc = e
+    if last_exc:
+        raise last_exc
+    raise RuntimeError('Не удалось выполнить логин Microsoft')
 try:
     from minecraft_launcher_lib.fabric import install_fabric as mll_install_fabric  # type: ignore
 except Exception:
@@ -600,12 +662,17 @@ class MainWindow(QMainWindow):
         self.add_account_button = QPushButton("+", self.centralwidget)
         self.add_account_button.setFixedWidth(30)
         self.add_account_button.clicked.connect(self.add_account)
+        self.add_ms_account_button = QPushButton("MS", self.centralwidget)
+        self.add_ms_account_button.setFixedWidth(36)
+        self.add_ms_account_button.setToolTip('Войти в Microsoft-аккаунт')
+        self.add_ms_account_button.clicked.connect(self.add_microsoft_account)
 
         right_panel = QVBoxLayout()
         right_panel.addWidget(QLabel('Аккаунт:', self.centralwidget))
         account_row = QHBoxLayout()
         account_row.addWidget(self.account_type, 4)
         account_row.addWidget(self.add_account_button, 1)
+        account_row.addWidget(self.add_ms_account_button, 1)
         right_panel.addLayout(account_row)
 
         self.settings_button = QPushButton('⚙️', self.centralwidget)
@@ -639,45 +706,104 @@ class MainWindow(QMainWindow):
         news_layout.addWidget(self.news_view)
         self.center_tabs.addTab(news_tab, 'Новости')
 
-        mods_tab = QWidget()
-        mods_layout = QVBoxLayout(mods_tab)
-        # Поиск модов
+        # Новая вкладка Modrinth с подвкладками
+        modrinth_tab = QWidget()
+        modrinth_layout = QVBoxLayout(modrinth_tab)
+        self.modrinth_sub_tabs = QTabWidget(modrinth_tab)
+
+        # Подвкладка "Моды" (старая логика модов)
+        mods_sub_tab = QWidget()
+        mods_sub_layout = QVBoxLayout(mods_sub_tab)
+        
+        # Переносим существующий поиск модов сюда
         mods_search_row = QHBoxLayout()
-        self.mods_search_edit = QLineEdit(mods_tab)
+        self.mods_search_edit = QLineEdit(mods_sub_tab)
         self.mods_search_edit.setPlaceholderText('Поиск модов Modrinth...')
-        self.mods_search_btn = QPushButton('Искать', mods_tab)
+        self.mods_search_btn = QPushButton('Искать', mods_sub_tab)
         self.mods_search_btn.clicked.connect(self.on_mods_search)
         self.mods_search_edit.returnPressed.connect(self.on_mods_search)
         mods_search_row.addWidget(self.mods_search_edit, 4)
         mods_search_row.addWidget(self.mods_search_btn, 1)
-        mods_layout.addLayout(mods_search_row)
+        mods_sub_layout.addLayout(mods_search_row)
 
-        # Фильтры: Loader и MC версия из выбранной версии лаунчера
         mods_filter_row = QHBoxLayout()
-        self.mods_loader_combo = QComboBox(mods_tab)
+        self.mods_loader_combo = QComboBox(mods_sub_tab)
         self.mods_loader_combo.addItems(['auto', 'fabric', 'quilt', 'forge'])
-        self.mods_gamever_combo = QComboBox(mods_tab)
+        self.mods_gamever_combo = QComboBox(mods_sub_tab)
         self.mods_gamever_combo.setEditable(True)
         self.mods_gamever_combo.setPlaceholderText('auto')
-        mods_filter_row.addWidget(QLabel('Загрузчик:', mods_tab))
+        mods_filter_row.addWidget(QLabel('Загрузчик:', mods_sub_tab))
         mods_filter_row.addWidget(self.mods_loader_combo)
-        mods_filter_row.addWidget(QLabel('MC версия:', mods_tab))
+        mods_filter_row.addWidget(QLabel('MC версия:', mods_sub_tab))
         mods_filter_row.addWidget(self.mods_gamever_combo)
-        mods_layout.addLayout(mods_filter_row)
+        mods_sub_layout.addLayout(mods_filter_row)
 
-        # Список результатов
-        self.mods_results = QListWidget(mods_tab)
-        mods_layout.addWidget(self.mods_results)
+        self.mods_results = QListWidget(mods_sub_tab)
+        mods_sub_layout.addWidget(self.mods_results)
 
-        # Действия
         mods_actions = QHBoxLayout()
-        self.mods_download_btn = QPushButton('Скачать выбранный мод', mods_tab)
-        self.mods_download_btn.clicked.connect(self.on_mod_download)
+        self.mods_download_btn = QPushButton('Скачать выбранный мод', mods_sub_tab)
+        self.mods_download_btn.clicked.connect(self.on_modrinth_download)
         mods_actions.addStretch(1)
         mods_actions.addWidget(self.mods_download_btn)
-        mods_layout.addLayout(mods_actions)
+        mods_sub_layout.addLayout(mods_actions)
 
-        self.center_tabs.addTab(mods_tab, 'Моды')
+        self.modrinth_sub_tabs.addTab(mods_sub_tab, 'Моды')
+
+        # Подвкладка "Ресурс-паки" (заглушка)
+        resource_packs_sub_tab = QWidget()
+        resource_packs_layout = QVBoxLayout(resource_packs_sub_tab)
+        self.resource_packs_search_edit = QLineEdit(resource_packs_sub_tab)
+        self.resource_packs_search_edit.setPlaceholderText('Поиск ресурс-паков Modrinth...')
+        self.resource_packs_search_btn = QPushButton('Искать', resource_packs_sub_tab)
+        self.resource_packs_search_btn.clicked.connect(self.on_mods_search) # Используем тот же метод поиска, но с другим project_type
+        self.resource_packs_search_edit.returnPressed.connect(self.on_mods_search)
+        
+        resource_packs_search_row = QHBoxLayout()
+        resource_packs_search_row.addWidget(self.resource_packs_search_edit, 4)
+        resource_packs_search_row.addWidget(self.resource_packs_search_btn, 1)
+        resource_packs_layout.addLayout(resource_packs_search_row)
+
+        self.resource_packs_results = QListWidget(resource_packs_sub_tab)
+        resource_packs_layout.addWidget(self.resource_packs_results)
+
+        resource_packs_actions = QHBoxLayout()
+        self.resource_packs_download_btn = QPushButton('Скачать выбранный ресурс-пак', resource_packs_sub_tab)
+        self.resource_packs_download_btn.clicked.connect(self.on_modrinth_download)
+        resource_packs_actions.addStretch(1)
+        resource_packs_actions.addWidget(self.resource_packs_download_btn)
+        resource_packs_layout.addLayout(resource_packs_actions)
+
+        self.modrinth_sub_tabs.addTab(resource_packs_sub_tab, 'Ресурс-паки')
+
+        # Подвкладка "Мод-паки" (заглушка)
+        modpacks_sub_tab = QWidget()
+        modpacks_layout = QVBoxLayout(modpacks_sub_tab)
+        self.modpacks_search_edit = QLineEdit(modpacks_sub_tab)
+        self.modpacks_search_edit.setPlaceholderText('Поиск мод-паков Modrinth...')
+        self.modpacks_search_btn = QPushButton('Искать', modpacks_sub_tab)
+        self.modpacks_search_btn.clicked.connect(self.on_mods_search) # Используем тот же метод поиска
+        self.modpacks_search_edit.returnPressed.connect(self.on_mods_search)
+
+        modpacks_search_row = QHBoxLayout()
+        modpacks_search_row.addWidget(self.modpacks_search_edit, 4)
+        modpacks_search_row.addWidget(self.modpacks_search_btn, 1)
+        modpacks_layout.addLayout(modpacks_search_row)
+
+        self.modpacks_results = QListWidget(modpacks_sub_tab)
+        modpacks_layout.addWidget(self.modpacks_results)
+
+        modpacks_actions = QHBoxLayout()
+        self.modpacks_download_btn = QPushButton('Скачать выбранный мод-пак', modpacks_sub_tab)
+        self.modpacks_download_btn.clicked.connect(self.on_modrinth_download)
+        modpacks_actions.addStretch(1)
+        modpacks_actions.addWidget(self.modpacks_download_btn)
+        modpacks_layout.addLayout(modpacks_actions)
+
+        self.modrinth_sub_tabs.addTab(modpacks_sub_tab, 'Мод-паки')
+        
+        modrinth_layout.addWidget(self.modrinth_sub_tabs)
+        self.center_tabs.addTab(modrinth_tab, 'Modrinth')
 
         console_tab = QWidget()
         console_layout = QVBoxLayout(console_tab)
@@ -876,21 +1002,40 @@ class MainWindow(QMainWindow):
             self.mods_gamever_combo.setCurrentText(mc)
 
     def on_mods_search(self):
-        query = self.mods_search_edit.text().strip()
-        self.mods_results.clear()
+        current_tab = self.modrinth_sub_tabs.currentWidget()
+
+        if current_tab == self.modrinth_sub_tabs.widget(0):  # Моды
+            query = self.mods_search_edit.text().strip()
+            results_list = self.mods_results
+            project_type = "mod"
+        elif current_tab == self.modrinth_sub_tabs.widget(1):  # Ресурс-паки
+            query = self.resource_packs_search_edit.text().strip()
+            results_list = self.resource_packs_results
+            project_type = "resourcepack"
+        elif current_tab == self.modrinth_sub_tabs.widget(2):  # Мод-паки
+            query = self.modpacks_search_edit.text().strip()
+            results_list = self.modpacks_results
+            project_type = "modpack"
+        else:
+            return
+
+        results_list.clear()
         try:
             headers = {
                 'User-Agent': self.get_user_agent()
             }
-            # Фасеты: project_type=mod, loaders/game_versions если заданы
-            facets = [["project_type:mod"]]
-            loader = self.mods_loader_combo.currentText()
-            if loader and loader != 'auto':
-                # Поиск по Modrinth использует loader как категорию
-                facets.append([f"categories:{loader}"])
+            facets = [[f"project_type:{project_type}"]]
+            
+            # Фильтры для модов применимы только к вкладке "Моды"
+            if project_type == "mod":
+                loader = self.mods_loader_combo.currentText()
+                if loader and loader != 'auto':
+                    facets.append([f"categories:{loader}"])
+            
             game_ver = self.mods_gamever_combo.currentText().strip()
             if game_ver and game_ver != 'auto':
                 facets.append([f"versions:{game_ver}"])
+
             params = {
                 'query': query if query else '',
                 'limit': 20,
@@ -905,12 +1050,166 @@ class MainWindow(QMainWindow):
                 desc = hit.get('description') or ''
                 pid = hit.get('project_id')
                 item = QListWidgetItem(f"{title} — {desc[:80]}")
-                item.setData(Qt.UserRole, {'project_id': pid})
-                self.mods_results.addItem(item)
+                item.setData(Qt.UserRole, {'project_id': pid, 'project_type': project_type})
+                results_list.addItem(item)
             if not hits:
-                self.mods_results.addItem(QListWidgetItem('Ничего не найдено'))
+                results_list.addItem(QListWidgetItem('Ничего не найдено'))
         except Exception as e:
             QMessageBox.warning(self, 'Ошибка поиска', f"{type(e).__name__}: {e}")
+
+    def on_modrinth_download(self):
+        current_tab = self.modrinth_sub_tabs.currentWidget()
+
+        if current_tab == self.modrinth_sub_tabs.widget(0):  # Моды
+            results_list = self.mods_results
+            item_type = "Мод"
+            download_func = self._download_mod
+        elif current_tab == self.modrinth_sub_tabs.widget(1):  # Ресурс-паки
+            results_list = self.resource_packs_results
+            item_type = "Ресурс-пак"
+            download_func = self._download_resource_pack
+        elif current_tab == self.modrinth_sub_tabs.widget(2):  # Мод-паки
+            results_list = self.modpacks_results
+            item_type = "Мод-пак"
+            download_func = self._download_modpack
+        else:
+            return
+
+        item = results_list.currentItem()
+        if not item:
+            QMessageBox.warning(self, item_type, f'Выберите {item_type.lower()} из списка.')
+            return
+        payload = item.data(Qt.UserRole)
+        if not isinstance(payload, dict) or 'project_id' not in payload:
+            QMessageBox.warning(self, item_type, f'Элемент не содержит данных проекта {item_type.lower()}.')
+            return
+        project_id = payload['project_id']
+        project_type = payload.get('project_type', 'mod') # По умолчанию "mod"
+
+        # Определяем таргет: выбранная версия/лоадер
+        mc_ver, loader = self.infer_selected_mc_and_loader()
+        if loader == 'auto':
+            loader = self.mods_loader_combo.currentText() or 'fabric'
+            if loader == 'auto':
+                loader = 'fabric'
+
+        try:
+            if project_type == "mod":
+                download_func(project_id, mc_ver, loader)
+            elif project_type == "resourcepack":
+                download_func(project_id, mc_ver) # resource packs don't have loaders
+            elif project_type == "modpack":
+                download_func(project_id) # modpacks don't need mc_ver and loader in this direct call
+            QMessageBox.information(self, item_type, f'{item_type} скачан успешно!')
+        except Exception as e:
+            QMessageBox.warning(self, f'Ошибка скачивания {item_type}', str(e))
+
+    def _download_mod(self, project_id: str, mc_ver: str, loader: str):
+        headers = {'User-Agent': self.get_user_agent()}
+        url = f'https://api.modrinth.com/v2/project/{project_id}/version'
+        resp = requests.get(url, headers=headers, timeout=12)
+        resp.raise_for_status()
+        versions = resp.json() or []
+        selected_version = None
+        for v in versions:
+            gv = v.get('game_versions') or []
+            loaders = v.get('loaders') or []
+            if (not mc_ver or mc_ver in gv) and (loader in loaders):
+                selected_version = v
+                break
+        if not selected_version and versions:
+            selected_version = versions[0]
+        if not selected_version:
+            raise RuntimeError('Не удалось подобрать версию мода для этой версии Minecraft.')
+        files = selected_version.get('files') or []
+        primary = None
+        for f in files:
+            if f.get('primary'):
+                primary = f
+                break
+        if not primary and files:
+            primary = files[0]
+        if not primary:
+            raise RuntimeError('В выбранной версии мода нет файлов для скачивания.')
+        url = primary.get('url') or primary.get('downloads', [None])[0]
+        if not url:
+            raise RuntimeError('Не найден URL файла мода.')
+        _, sel_loader = self.infer_selected_mc_and_loader()
+        if sel_loader in {'fabric', 'quilt', 'forge'}:
+            profile_name = f"{mc_ver}-{sel_loader}"
+        else:
+            profile_name = mc_ver
+        game_dir = os.path.join(minecraft_directory, 'profiles', profile_name)
+        try:
+            os.makedirs(game_dir, exist_ok=True)
+            for sub in ['mods', 'config', 'resourcepacks']:
+                os.makedirs(os.path.join(game_dir, sub), exist_ok=True)
+        except Exception:
+            pass
+        mods_dir = os.path.join(game_dir, 'mods')
+        os.makedirs(mods_dir, exist_ok=True)
+        filename = primary.get('filename') or os.path.basename(url)
+        target = os.path.join(mods_dir, filename)
+        with requests.get(url, headers=headers, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            with open(target, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        QMessageBox.information(self, 'Моды', f'Мод скачан: {target}')
+
+    def _download_resource_pack(self, project_id: str, mc_ver: str):
+        headers = {'User-Agent': self.get_user_agent()}
+        url = f'https://api.modrinth.com/v2/project/{project_id}/version'
+        resp = requests.get(url, headers=headers, timeout=12)
+        resp.raise_for_status()
+        versions = resp.json() or []
+        selected_version = None
+        for v in versions:
+            gv = v.get('game_versions') or []
+            if (not mc_ver or mc_ver in gv):
+                selected_version = v
+                break
+        if not selected_version and versions:
+            selected_version = versions[0]
+        if not selected_version:
+            raise RuntimeError('Не удалось подобрать версию ресурс-пака для этой версии Minecraft.')
+        files = selected_version.get('files') or []
+        primary = None
+        for f in files:
+            if f.get('primary'):
+                primary = f
+                break
+        if not primary and files:
+            primary = files[0]
+        if not primary:
+            raise RuntimeError('В выбранной версии ресурс-пака нет файлов для скачивания.')
+        url = primary.get('url') or primary.get('downloads', [None])[0]
+        if not url:
+            raise RuntimeError('Не найден URL файла ресурс-пака.')
+        
+        profile_name = mc_ver # Ресурс-паки устанавливаются в профиль выбранной версии
+        game_dir = os.path.join(minecraft_directory, 'profiles', profile_name)
+        try:
+            os.makedirs(game_dir, exist_ok=True)
+            # Убедимся, что папка resourcepacks существует
+            os.makedirs(os.path.join(game_dir, 'resourcepacks'), exist_ok=True)
+        except Exception:
+            pass
+        resource_packs_dir = os.path.join(game_dir, 'resourcepacks')
+        os.makedirs(resource_packs_dir, exist_ok=True)
+        filename = primary.get('filename') or os.path.basename(url)
+        target = os.path.join(resource_packs_dir, filename)
+        with requests.get(url, headers=headers, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            with open(target, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        QMessageBox.information(self, 'Ресурс-паки', f'Ресурс-пак скачан: {target}')
+
+    def _download_modpack(self, project_id: str):
+        QMessageBox.information(self, 'Мод-паки', f'Функция скачивания мод-паков для {project_id} пока не реализована.')
 
     def on_mod_download(self):
         item = self.mods_results.currentItem()
@@ -1220,7 +1519,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Такой аккаунт уже существует.")
                 return
 
-            users.append({'nickname': nick})
+            users.append({'nickname': nick, 'type': 'offline'})
 
             with open(self.users_path, 'w', encoding='utf-8') as f:
                 json.dump(users, f, indent=4, ensure_ascii=False)
@@ -1229,6 +1528,49 @@ class MainWindow(QMainWindow):
             index = self.account_type.findText(nick)
             if index >= 0:
                 self.account_type.setCurrentIndex(index)
+
+    def add_microsoft_account(self):
+        ok, msg = _check_microsoft_prereqs()
+        if not ok:
+            QMessageBox.warning(self, 'Microsoft', f'Библиотека Microsoft-логина недоступна.\n{msg}')
+            return
+        try:
+            # Папка для хранения токенов (рекомендуемая библиотекой)
+            ms_dir = os.path.join(os.getenv('APPDATA'), '.MjnLauncher', 'ms')
+            os.makedirs(ms_dir, exist_ok=True)
+            # Используем совместимую обёртку, чтобы поддержать разные версии библиотеки
+            login_data = _ms_login(token_directory=ms_dir)
+            # login_data содержит access_token, uuid, name
+            profile_nick = login_data.get('name') or 'Player'
+            new_user = {
+                'nickname': profile_nick,
+                'type': 'microsoft',
+                'uuid': login_data.get('id') or login_data.get('uuid') or '',
+                'access_token': login_data.get('access_token') or login_data.get('accessToken') or ''
+            }
+            try:
+                with open(self.users_path, 'r', encoding='utf-8') as f:
+                    users = json.load(f)
+            except Exception:
+                users = []
+            # Заменяем по uuid, если уже есть
+            replaced = False
+            for i, u in enumerate(users):
+                if u.get('type') == 'microsoft' and u.get('uuid') == new_user['uuid']:
+                    users[i] = new_user
+                    replaced = True
+                    break
+            if not replaced:
+                users.append(new_user)
+            with open(self.users_path, 'w', encoding='utf-8') as f:
+                json.dump(users, f, indent=4, ensure_ascii=False)
+            self.load_accounts()
+            idx = self.account_type.findText(profile_nick)
+            if idx >= 0:
+                self.account_type.setCurrentIndex(idx)
+            QMessageBox.information(self, 'Microsoft', 'Аккаунт добавлен.')
+        except Exception as e:
+            QMessageBox.warning(self, 'Microsoft', f'Ошибка входа: {e}')
 
     def state_update(self, value: bool):
         self.start_button.setDisabled(value)
