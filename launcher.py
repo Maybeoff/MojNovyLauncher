@@ -636,7 +636,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        self.setWindowTitle('MJNL v1.3.1-beta')
+        self.setWindowTitle('MJNL v1.3.2-beta')
         self.resize(300, 200)
         self.centralwidget = QWidget(self)
 
