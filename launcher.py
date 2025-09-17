@@ -22,6 +22,8 @@ except Exception:
 import re
 import html as htmllib
 
+__version__ = '1.3.2-beta'
+
 def markdown_to_html_simple(source: str) -> str:
     # Escape base HTML
     text = htmllib.escape(source)
@@ -97,66 +99,6 @@ from minecraft_launcher_lib.utils import get_minecraft_directory, get_version_li
 from minecraft_launcher_lib.install import install_minecraft_version
 from minecraft_launcher_lib.command import get_minecraft_command
 try:
-    # В новых версиях библиотека экспортирует модуль через корневой пакет
-    from minecraft_launcher_lib import microsoft_account as _ms_account  # type: ignore
-    login_with_microsoft = getattr(_ms_account, 'login_with_microsoft', None)
-    if login_with_microsoft is None:
-        raise ImportError('login_with_microsoft not found')
-except Exception:
-    try:
-        # Обратная совместимость со старыми версиями
-        from minecraft_launcher_lib.microsoft_account import login_with_microsoft  # type: ignore
-    except Exception:
-        login_with_microsoft = None
-
-def _check_microsoft_prereqs() -> tuple:
-    """Возвращает (ok, message). Проверяет наличие зависимостей для Microsoft-логина."""
-    try:
-        import msal  # type: ignore
-        _ = msal
-    except Exception:
-        return (False, 'Не найден модуль msal. Установите: pip install msal')
-    if login_with_microsoft is None:
-        return (False, 'Не найден login_with_microsoft из minecraft_launcher_lib. Обновите библиотеку: pip install -U minecraft-launcher-lib')
-    return (True, '')
-
-def _ms_login(token_directory: str):
-    """Совместимый вызов логина Microsoft для разных версий minecraft-launcher-lib.
-    Возвращает dict с полями как минимум name/id/access_token или бросает исключение.
-    """
-    # Пытаемся разные имена функций и сигнатуры
-    candidates = []
-    try:
-        from minecraft_launcher_lib import microsoft_account as _m
-        # Приоритетные варианты имён
-        for name in (
-            'login_with_microsoft',  # современное имя
-            'login',                 # альтернативное имя
-            'login_microsoft',       # редкие форки
-        ):
-            fn = getattr(_m, name, None)
-            if callable(fn):
-                candidates.append(fn)
-    except Exception:
-        pass
-    if not candidates:
-        raise RuntimeError('В установленной minecraft-launcher-lib нет функции логина Microsoft')
-    last_exc = None
-    for fn in candidates:
-        try:
-            # Наиболее частая сигнатура
-            return fn(client_id='00000000402b5328', token_directory=token_directory)
-        except TypeError:
-            try:
-                return fn(token_directory)
-            except Exception as e:
-                last_exc = e
-        except Exception as e:
-            last_exc = e
-    if last_exc:
-        raise last_exc
-    raise RuntimeError('Не удалось выполнить логин Microsoft')
-try:
     from minecraft_launcher_lib.fabric import install_fabric as mll_install_fabric  # type: ignore
 except Exception:
     mll_install_fabric = None
@@ -172,24 +114,26 @@ minecraft_directory = get_minecraft_directory().replace('minecraft', 'mjnlaunche
 
 
 class LaunchThread(QThread):
-    launch_setup_signal = pyqtSignal(str, str)
+    launch_setup_signal = pyqtSignal(str, str, str)
     progress_update_signal = pyqtSignal(int, int, str)
     state_update_signal = pyqtSignal(bool)
     message_signal = pyqtSignal(str, str)
     console_output_signal = pyqtSignal(str)
 
-    def __init__(self):
+    def __init__(self, minecraft_directory: str):
         super().__init__()
         self.launch_setup_signal.connect(self.launch_setup)
         self.version_id = ''
         self.username = ''
+        self.minecraft_directory = minecraft_directory
         self.progress = 0
         self.progress_max = 0
         self.progress_label = ''
 
-    def launch_setup(self, version_id, username):
+    def launch_setup(self, version_id, username, minecraft_directory):
         self.version_id = version_id
         self.username = username
+        self.minecraft_directory = minecraft_directory
 
     def update_progress_label(self, value):
         self.progress_label = value
@@ -207,13 +151,13 @@ class LaunchThread(QThread):
         self.state_update_signal.emit(True)
 
         def is_version_installed(version_id: str) -> bool:
-            version_dir = os.path.join(minecraft_directory, 'versions', version_id)
+            version_dir = os.path.join(self.minecraft_directory, 'versions', version_id)
             version_json = os.path.join(version_dir, f"{version_id}.json")
             version_jar = os.path.join(version_dir, f"{version_id}.jar")
             return os.path.isdir(version_dir) and os.path.isfile(version_json)
 
         def find_installed_mod_version(base_version: str, loader: str) -> str:
-            versions_dir = os.path.join(minecraft_directory, 'versions')
+            versions_dir = os.path.join(self.minecraft_directory, 'versions')
             try:
                 candidates = []
                 for entry in os.listdir(versions_dir):
@@ -246,7 +190,7 @@ class LaunchThread(QThread):
                 if not is_version_installed(base_version):
                     install_minecraft_version(
                         versionid=base_version,
-                        minecraft_directory=minecraft_directory,
+                        minecraft_directory=self.minecraft_directory,
                         callback={
                             'setStatus': self.update_progress_label,
                             'setProgress': self.update_progress,
@@ -256,7 +200,7 @@ class LaunchThread(QThread):
                 if loader == 'fabric' and mll_install_fabric is not None:
                     mll_install_fabric(
                         minecraft_version=base_version,
-                        minecraft_directory=minecraft_directory,
+                        minecraft_directory=self.minecraft_directory,
                         callback={
                             'setStatus': self.update_progress_label,
                             'setProgress': self.update_progress,
@@ -266,7 +210,7 @@ class LaunchThread(QThread):
                 elif loader == 'quilt' and mll_install_quilt is not None:
                     mll_install_quilt(
                         minecraft_version=base_version,
-                        minecraft_directory=minecraft_directory,
+                        minecraft_directory=self.minecraft_directory,
                         callback={
                             'setStatus': self.update_progress_label,
                             'setProgress': self.update_progress,
@@ -302,7 +246,7 @@ class LaunchThread(QThread):
                 if 'fabric' in version_to_launch.lower() or 'quilt' in version_to_launch.lower():
                     alias_id = f"{base_version} {loader}"
                     try:
-                        alias_dir = os.path.join(minecraft_directory, 'versions', alias_id)
+                        alias_dir = os.path.join(self.minecraft_directory, 'versions', alias_id)
                         alias_json_path = os.path.join(alias_dir, f"{alias_id}.json")
                         if not os.path.isfile(alias_json_path):
                             os.makedirs(alias_dir, exist_ok=True)
@@ -317,7 +261,7 @@ class LaunchThread(QThread):
                     except Exception:
                         pass
                 # Для модовой версии используем отдельную папку профиля
-                game_dir_override = os.path.join(minecraft_directory, 'profiles', f"{base_version}-{loader}")
+                game_dir_override = os.path.join(self.minecraft_directory, 'profiles', f"{base_version}-{loader}")
                 try:
                     os.makedirs(game_dir_override, exist_ok=True)
                     for sub in ['mods', 'config', 'resourcepacks', 'saves']:
@@ -330,7 +274,7 @@ class LaunchThread(QThread):
                 if not is_version_installed(version_to_launch):
                     install_minecraft_version(
                         versionid=version_to_launch,
-                        minecraft_directory=minecraft_directory,
+                        minecraft_directory=self.minecraft_directory,
                         callback={
                             'setStatus': self.update_progress_label,
                             'setProgress': self.update_progress,
@@ -347,16 +291,14 @@ class LaunchThread(QThread):
 
         # Запуск игры с ником (offline-режим)
         options = {
-            'username': self.username,
-            'uuid': '',
-            'token': ''
+            'username': self.username
         }
         if game_dir_override:
             options['gameDirectory'] = game_dir_override
 
         cmd = get_minecraft_command(
             version=version_to_launch,
-            minecraft_directory=minecraft_directory,
+            minecraft_directory=self.minecraft_directory,
             options=options
         )
         try:
@@ -632,9 +574,221 @@ class SettingsDialog(QDialog):
         self.setStyleSheet(dark_style)
 
 
+class ModpackVersionDialog(QDialog):
+    def __init__(self, parent, project_id: str, modpack_name: str):
+        super().__init__(parent)
+        self.setWindowTitle(f'Выбор версии для {modpack_name}')
+        self.setModal(True)
+        self.resize(400, 500)
+
+        self.project_id = project_id
+        self.selected_version_data = None
+
+        layout = QVBoxLayout(self)
+
+        self.version_list = QListWidget(self)
+        self.version_list.itemDoubleClicked.connect(self.accept)
+        layout.addWidget(self.version_list)
+
+        buttons_layout = QHBoxLayout()
+        self.cancel_button = QPushButton('Отмена', self)
+        self.cancel_button.clicked.connect(self.reject)
+        self.select_button = QPushButton('Выбрать', self)
+        self.select_button.clicked.connect(self.on_select_button_clicked)
+
+        buttons_layout.addStretch(1)
+        buttons_layout.addWidget(self.cancel_button)
+        buttons_layout.addWidget(self.select_button)
+        layout.addLayout(buttons_layout)
+
+        self.load_versions()
+        if parent and hasattr(parent, 'settings'):
+            if parent.settings.get('dark_theme', False):
+                self.apply_dark_theme()
+
+    def get_user_agent(self):
+        if isinstance(self.parent(), MainWindow):
+            return self.parent().get_user_agent()
+        return 'MojNovyLauncher/1.2 (ModpackVersionDialog)'
+
+    def load_versions(self):
+        self.version_list.clear()
+        self.version_list.addItem('Загрузка версий...')
+        try:
+            headers = {'User-Agent': self.get_user_agent()}
+            url = f'https://api.modrinth.com/v2/project/{self.project_id}/version'
+            resp = requests.get(url, headers=headers, timeout=12)
+            resp.raise_for_status()
+            versions_data = resp.json() or []
+
+            # Фильтруем только релизы и сортируем по дате, чтобы найти последнюю
+            release_versions = [v for v in versions_data if v.get('version_type') == 'release']
+            release_versions.sort(key=lambda x: x.get('date_published', ''), reverse=True)
+
+            self.version_list.clear()
+            if not release_versions:
+                self.version_list.addItem('Версии не найдены.')
+                return
+
+            for v in release_versions:
+                version_name = v.get('version_number')
+                game_versions = ', '.join(v.get('game_versions', []))
+                loaders = ', '.join(v.get('loaders', []))
+                item_text = f'{version_name} (MC: {game_versions}, Loader: {loaders})'
+                item = QListWidgetItem(item_text)
+                item.setData(Qt.UserRole, v) # Сохраняем все данные версии в UserRole
+                self.version_list.addItem(item)
+
+        except Exception as e:
+            self.version_list.clear()
+            self.version_list.addItem(f'Ошибка загрузки: {e}')
+            QMessageBox.warning(self, 'Ошибка', f'Не удалось загрузить версии мод-пака.\n{str(e)}')
+            self.reject()
+
+    def on_select_button_clicked(self):
+        selected_item = self.version_list.currentItem()
+        if selected_item:
+            self.selected_version_data = selected_item.data(Qt.UserRole)
+            self.accept()
+        else:
+            QMessageBox.warning(self, 'Выбор версии', 'Пожалуйста, выберите версию из списка.')
+
+    def get_selected_version_data(self):
+        return self.selected_version_data
+
+    def apply_dark_theme(self):
+        dark_style = """
+        QDialog {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QWidget {
+            background-color: #2b2b2b;
+            color: #ffffff;
+        }
+        QPushButton {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 6px;
+            color: #ffffff;
+        }
+        QPushButton:hover {
+            background-color: #505050;
+        }
+        QPushButton:pressed {
+            background-color: #353535;
+        }
+        QComboBox {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QComboBox:hover {
+            background-color: #505050;
+        }
+        QComboBox::drop-down {
+            border: none;
+        }
+        QComboBox::down-arrow {
+            image: none;
+            border-left: 5px solid transparent;
+            border-right: 5px solid transparent;
+            border-top: 5px solid #ffffff;
+            margin-right: 5px;
+        }
+        QComboBox QAbstractItemView {
+            background-color: #404040;
+            border: 1px solid #555555;
+            selection-background-color: #505050;
+            color: #ffffff;
+        }
+        QLabel {
+            color: #ffffff;
+        }
+        QLineEdit {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QLineEdit:focus {
+            border: 1px solid #4a9eff;
+        }
+        QSpinBox {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            padding: 4px;
+            color: #ffffff;
+        }
+        QSpinBox:focus {
+            border: 1px solid #4a9eff;
+        }
+        QCheckBox {
+            color: #ffffff;
+        }
+        QCheckBox::indicator {
+            width: 16px;
+            height: 16px;
+        }
+        QCheckBox::indicator:unchecked {
+            background-color: #404040;
+            border: 1px solid #555555;
+            border-radius: 3px;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #4a9eff;
+            border: 1px solid #4a9eff;
+            border-radius: 3px;
+        }
+        QTabWidget::pane {
+            border: 1px solid #555555;
+            background-color: #2b2b2b;
+        }
+        QTabBar::tab {
+            background-color: #404040;
+            border: 1px solid #555555;
+            padding: 8px 16px;
+            color: #ffffff;
+        }
+        QTabBar::tab:selected {
+            background-color: #505050;
+        }
+        QTabBar::tab:hover {
+            background-color: #4a4a4a;
+        }
+        QGroupBox {
+            color: #ffffff;
+            border: 1px solid #555555;
+            border-radius: 4px;
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px 0 5px;
+        }
+        """
+        self.setStyleSheet(dark_style)
+
+
 class MainWindow(QMainWindow):
+    console_output_signal = pyqtSignal(str) # Объявляем сигнал на уровне класса
+
     def __init__(self):
         super().__init__()
+
+        self.user_agent_format = 'MojNovyLauncher/1.2 ({version} - Modrinth API)'
+
+        # Путь установки Minecraft для MjnLauncher
+        self.minecraft_directory = get_minecraft_directory().replace('minecraft', 'mjnlauncher')
+
+        self.console_output_signal.connect(self.append_console) # Подключаем сигнал в __init__
 
         self.setWindowTitle('MJNL v1.3.2-beta')
         self.resize(300, 200)
@@ -659,20 +813,15 @@ class MainWindow(QMainWindow):
 
         # ПРАВАЯ БОКОВАЯ ПАНЕЛЬ (аккаунт/настройки)
         self.account_type = QComboBox(self.centralwidget)
-        self.add_account_button = QPushButton("+", self.centralwidget)
+        self.add_account_button = QPushButton("+" , self.centralwidget)
         self.add_account_button.setFixedWidth(30)
         self.add_account_button.clicked.connect(self.add_account)
-        self.add_ms_account_button = QPushButton("MS", self.centralwidget)
-        self.add_ms_account_button.setFixedWidth(36)
-        self.add_ms_account_button.setToolTip('Войти в Microsoft-аккаунт')
-        self.add_ms_account_button.clicked.connect(self.add_microsoft_account)
 
         right_panel = QVBoxLayout()
         right_panel.addWidget(QLabel('Аккаунт:', self.centralwidget))
         account_row = QHBoxLayout()
         account_row.addWidget(self.account_type, 4)
-        account_row.addWidget(self.add_account_button, 1)
-        account_row.addWidget(self.add_ms_account_button, 1)
+        account_row.addWidget(self.add_account_button)
         right_panel.addLayout(account_row)
 
         self.settings_button = QPushButton('⚙️', self.centralwidget)
@@ -779,26 +928,32 @@ class MainWindow(QMainWindow):
         # Подвкладка "Мод-паки" (заглушка)
         modpacks_sub_tab = QWidget()
         modpacks_layout = QVBoxLayout(modpacks_sub_tab)
-        self.modpacks_search_edit = QLineEdit(modpacks_sub_tab)
-        self.modpacks_search_edit.setPlaceholderText('Поиск мод-паков Modrinth...')
-        self.modpacks_search_btn = QPushButton('Искать', modpacks_sub_tab)
-        self.modpacks_search_btn.clicked.connect(self.on_mods_search) # Используем тот же метод поиска
-        self.modpacks_search_edit.returnPressed.connect(self.on_mods_search)
+        
+        # self.modpacks_search_edit = QLineEdit(modpacks_sub_tab)
+        # self.modpacks_search_edit.setPlaceholderText('Поиск мод-паков Modrinth...')
+        # self.modpacks_search_btn = QPushButton('Искать', modpacks_sub_tab)
+        # self.modpacks_search_btn.clicked.connect(self.on_mods_search)
+        # self.modpacks_search_edit.returnPressed.connect(self.on_mods_search)
 
-        modpacks_search_row = QHBoxLayout()
-        modpacks_search_row.addWidget(self.modpacks_search_edit, 4)
-        modpacks_search_row.addWidget(self.modpacks_search_btn, 1)
-        modpacks_layout.addLayout(modpacks_search_row)
+        # modpacks_search_row = QHBoxLayout()
+        # modpacks_search_row.addWidget(self.modpacks_search_edit, 4)
+        # modpacks_search_row.addWidget(self.modpacks_search_btn, 1)
+        # modpacks_layout.addLayout(modpacks_search_row)
 
-        self.modpacks_results = QListWidget(modpacks_sub_tab)
-        modpacks_layout.addWidget(self.modpacks_results)
+        # self.modpacks_results = QListWidget(modpacks_sub_tab)
+        # modpacks_layout.addWidget(self.modpacks_results)
 
-        modpacks_actions = QHBoxLayout()
-        self.modpacks_download_btn = QPushButton('Скачать выбранный мод-пак', modpacks_sub_tab)
-        self.modpacks_download_btn.clicked.connect(self.on_modrinth_download)
-        modpacks_actions.addStretch(1)
-        modpacks_actions.addWidget(self.modpacks_download_btn)
-        modpacks_layout.addLayout(modpacks_actions)
+        # modpacks_actions = QHBoxLayout()
+        # self.modpacks_download_btn = QPushButton('Скачать выбранный мод-пак', modpacks_sub_tab)
+        # self.modpacks_download_btn.clicked.connect(self.on_modrinth_download)
+        # modpacks_actions.addStretch(1)
+        # modpacks_actions.addWidget(self.modpacks_download_btn)
+        # modpacks_layout.addLayout(modpacks_actions)
+
+        message_label = QLabel('Функциональность мод-паков будет добавлена скоро', modpacks_sub_tab)
+        message_label.setAlignment(Qt.AlignCenter)
+        modpacks_layout.addWidget(message_label)
+        modpacks_layout.addStretch(1)
 
         self.modrinth_sub_tabs.addTab(modpacks_sub_tab, 'Мод-паки')
         
@@ -823,7 +978,7 @@ class MainWindow(QMainWindow):
 
         # Список версий и фильтр (нижняя панель)
         self.version_filter = QComboBox(self.centralwidget)
-        self.version_filter.addItems(['Релизы', 'Снапшоты', 'Все'])
+        self.version_filter.addItems(['Релизы', 'Снапшоты', 'Все', 'Модифицированные'])
         self.version_filter.currentIndexChanged.connect(self.on_version_filter_changed)
 
         self.refresh_versions_button = QPushButton("🔄 Обновить", self.centralwidget)
@@ -899,7 +1054,7 @@ class MainWindow(QMainWindow):
         self.init_system_tray()
         
         # Поток для запуска игры
-        self.launch_thread = LaunchThread()
+        self.launch_thread = LaunchThread(self.minecraft_directory)
         self.launch_thread.state_update_signal.connect(self.state_update)
         self.launch_thread.progress_update_signal.connect(self.update_progress)
         self.launch_thread.message_signal.connect(self.show_message)
@@ -937,8 +1092,8 @@ class MainWindow(QMainWindow):
             self.news_view.setPlainText(f"Не удалось загрузить новости.\n{str(e)}")
 
     # ===== Modrinth helpers =====
-    def get_user_agent(self) -> str:
-        return 'MojNovyLauncher/1.2 (mods)'
+    def get_user_agent(self):
+        return self.user_agent_format.format(version=__version__)
 
     def infer_selected_mc_and_loader(self) -> tuple:
         # Возвращает (mc_version, loader) из выбранной версии в лаунчере
@@ -985,8 +1140,10 @@ class MainWindow(QMainWindow):
                     allowed_types = {'release'}
                 elif mode == 'Снапшоты':
                     allowed_types = {'snapshot'}
+                elif mode == 'Модифицированные':
+                    allowed_types = {'modified'}
                 else:
-                    allowed_types = None
+                    allowed_types = None  # Все
                 if allowed_types is not None:
                     versions = [v for v in versions if v.get('type') in allowed_types]
         except Exception:
@@ -1099,7 +1256,17 @@ class MainWindow(QMainWindow):
             elif project_type == "resourcepack":
                 download_func(project_id, mc_ver) # resource packs don't have loaders
             elif project_type == "modpack":
-                download_func(project_id) # modpacks don't need mc_ver and loader in this direct call
+                modpack_name = item.text().split('—')[0].strip()
+                dialog = ModpackVersionDialog(self, project_id, modpack_name)
+                if dialog.exec_() == QDialog.Accepted:
+                    selected_version_data = dialog.get_selected_version_data()
+                    if selected_version_data:
+                        download_func(project_id, selected_version_data) # Передаем данные выбранной версии
+                    else:
+                        QMessageBox.warning(self, item_type, 'Версия мод-пака не выбрана.')
+                else:
+                    QMessageBox.information(self, item_type, 'Скачивание мод-пака отменено.')
+                # modpacks don't need mc_ver and loader in this direct call
             QMessageBox.information(self, item_type, f'{item_type} скачан успешно!')
         except Exception as e:
             QMessageBox.warning(self, f'Ошибка скачивания {item_type}', str(e))
@@ -1139,7 +1306,7 @@ class MainWindow(QMainWindow):
             profile_name = f"{mc_ver}-{sel_loader}"
         else:
             profile_name = mc_ver
-        game_dir = os.path.join(minecraft_directory, 'profiles', profile_name)
+        game_dir = os.path.join(self.minecraft_directory, 'profiles', profile_name)
         try:
             os.makedirs(game_dir, exist_ok=True)
             for sub in ['mods', 'config', 'resourcepacks']:
@@ -1188,8 +1355,15 @@ class MainWindow(QMainWindow):
         if not url:
             raise RuntimeError('Не найден URL файла ресурс-пака.')
         
-        profile_name = mc_ver # Ресурс-паки устанавливаются в профиль выбранной версии
-        game_dir = os.path.join(minecraft_directory, 'profiles', profile_name)
+        # Определяем путь для установки ресурс-пака
+        # Используем infer_selected_mc_and_loader, чтобы учесть выбранный модлоадер
+        _, sel_loader = self.infer_selected_mc_and_loader()
+        if sel_loader in {'fabric', 'quilt', 'forge'}:
+            profile_name = f"{mc_ver}-{sel_loader}"
+        else:
+            profile_name = mc_ver # Ресурс-паки устанавливаются в профиль выбранной версии
+
+        game_dir = os.path.join(self.minecraft_directory, 'profiles', profile_name)
         try:
             os.makedirs(game_dir, exist_ok=True)
             # Убедимся, что папка resourcepacks существует
@@ -1208,8 +1382,123 @@ class MainWindow(QMainWindow):
                         f.write(chunk)
         QMessageBox.information(self, 'Ресурс-паки', f'Ресурс-пак скачан: {target}')
 
-    def _download_modpack(self, project_id: str):
-        QMessageBox.information(self, 'Мод-паки', f'Функция скачивания мод-паков для {project_id} пока не реализована.')
+    def _download_modpack(self, project_id: str, selected_version_data: dict):
+        headers = {'User-Agent': self.get_user_agent()}
+        
+        # Используем уже выбранную версию
+        selected_version = selected_version_data
+
+        files = selected_version.get('files') or []
+        mrpack_file = None
+        for f in files:
+            if f.get('filename', '').endswith('.mrpack'):
+                mrpack_file = f
+                break
+        
+        if not mrpack_file:
+            raise RuntimeError('В выбранной версии мод-пака нет .mrpack файла.')
+            
+        download_url = mrpack_file.get('url')
+        if not download_url:
+            raise RuntimeError('Не найден URL для скачивания .mrpack файла.')
+            
+        modpack_name = selected_version.get('name') or project_id
+        temp_modpack_path = os.path.join(self.minecraft_directory, 'temp_modpacks', f'{modpack_name}.mrpack')
+        os.makedirs(os.path.dirname(temp_modpack_path), exist_ok=True)
+
+        # Скачиваем .mrpack файл
+        self.console_output_signal.emit(f"[Modpack] Скачивание мод-пака в: {temp_modpack_path}")
+        with requests.get(download_url, headers=headers, timeout=30, stream=True) as r:
+            r.raise_for_status()
+            with open(temp_modpack_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+        self.console_output_signal.emit("[Modpack] Мод-пак скачан. Извлечение...")
+        
+        # 2. Извлекаем содержимое .mrpack файла
+        extract_dir = os.path.join(self.minecraft_directory, 'temp_modpacks', modpack_name)
+        self.console_output_signal.emit(f"[Modpack] Извлечение в: {extract_dir}")
+        shutil.unpack_archive(temp_modpack_path, extract_dir, format='zip')
+        
+        # 3. Разбираем modrinth.index.json
+        index_path = os.path.join(extract_dir, 'modrinth.index.json')
+        if not os.path.exists(index_path):
+            raise RuntimeError('Файл modrinth.index.json не найден в мод-паке.')
+
+        with open(index_path, 'r', encoding='utf-8') as f:
+            modrinth_index = json.load(f)
+
+        # 4. Создаем новую версию Minecraft на основе мод-пака
+        game_data = modrinth_index.get('game')
+        
+        if isinstance(game_data, str):
+            # Если 'game' - это строка (например, 'minecraft'), берем версию из зависимостей
+            mc_version = modrinth_index.get('dependencies', {}).get('minecraft')
+            if not mc_version:
+                raise RuntimeError('Неверный формат modrinth.index.json: отсутствует версия Minecraft в зависимостях.')
+        elif isinstance(game_data, dict):
+            # Если 'game' - это словарь, берем версию из него
+            mc_version = game_data.get('version')
+            if not mc_version:
+                raise RuntimeError('Неверный формат modrinth.index.json: отсутствует версия игры в объекте "game".')
+        else:
+            raise RuntimeError('Неверный формат modrinth.index.json: отсутствует или неверный объект "game".')
+
+        version_id = f'{modpack_name}-{mc_version}'
+        # Путь к основной директории игры для мод-пака (внутри profiles)
+        modpack_game_dir = os.path.join(self.minecraft_directory, 'profiles', version_id)
+        os.makedirs(modpack_game_dir, exist_ok=True)
+
+        # Создаем json-файл в директории версий, который будет наследоваться от базовой версии
+        # и указывать на директорию игры в profiles
+        modpack_version_dir = os.path.join(self.minecraft_directory, 'versions', version_id)
+        os.makedirs(modpack_version_dir, exist_ok=True)
+        
+        temp_json_path = os.path.join(modpack_version_dir, f'{version_id}.json')
+        with open(temp_json_path, 'w', encoding='utf-8') as f_json:
+            json.dump({
+                'id': version_id,
+                'inheritsFrom': mc_version, # Наследуемся от базовой MC версии
+                'type': 'modified',
+                'gameDirectory': modpack_game_dir # Указываем на директорию профиля
+            }, f_json, indent=4, ensure_ascii=False)
+
+        # 5. Копируем файлы из папки overrides
+        overrides_path = os.path.join(extract_dir, 'overrides')
+        if os.path.exists(overrides_path):
+            for item in os.listdir(overrides_path):
+                s = os.path.join(overrides_path, item)
+                d = os.path.join(modpack_game_dir, item)
+                if os.path.isdir(s):
+                    shutil.copytree(s, d, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(s, d)
+                    
+        # 6. Скачиваем и устанавливаем компоненты, указанные в modrinth.index.json
+        for file_entry in modrinth_index.get('files', []):
+            file_url = file_entry.get('downloads')[0] if file_entry.get('downloads') else None
+            file_path_in_modpack = file_entry.get('path')
+            
+            if not file_url or not file_path_in_modpack:
+                self.console_output_signal.emit(f"[Modpack] Пропущен файл с отсутствующим URL или путем: {file_entry}")
+                continue
+
+            target_path = os.path.join(modpack_game_dir, file_path_in_modpack)
+            os.makedirs(os.path.dirname(target_path), exist_ok=True)
+
+            try:
+                with requests.get(file_url, headers=headers, timeout=30, stream=True) as r:
+                    r.raise_for_status()
+                    with open(target_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                f.write(chunk)
+                self.console_output_signal.emit(f"[Modpack] Скачан: {file_path_in_modpack}")
+            except Exception as e:
+                self.console_output_signal.emit(f"[Modpack] Ошибка скачивания {file_path_in_modpack}: {e}")
+        
+        QMessageBox.information(self, 'Мод-паки', f'Мод-пак "{modpack_name}" установлен как версия {version_id}. Все компоненты загружены.')
 
     def on_mod_download(self):
         item = self.mods_results.currentItem()
@@ -1269,7 +1558,7 @@ class MainWindow(QMainWindow):
             else:
                 # Для ванильной версии создаем отдельный профиль по названию версии
                 profile_name = mc_ver
-            game_dir = os.path.join(minecraft_directory, 'profiles', profile_name)
+            game_dir = os.path.join(self.minecraft_directory, 'profiles', profile_name)
             try:
                 os.makedirs(game_dir, exist_ok=True)
                 for sub in ['mods', 'config', 'resourcepacks']:
@@ -1296,7 +1585,9 @@ class MainWindow(QMainWindow):
             with open(self.users_path, 'r', encoding='utf-8') as f:
                 users = json.load(f)
                 for user in users:
-                    self.account_type.addItem(user.get('nickname', 'Unknown'))
+                    # Если тип аккаунта не указан или это оффлайн аккаунт, добавляем его
+                    if user.get('type', 'offline') == 'offline':
+                        self.account_type.addItem(user.get('nickname', 'Unknown'))
         except Exception:
             self.account_type.addItem('Player')
 
@@ -1330,23 +1621,29 @@ class MainWindow(QMainWindow):
         self.refresh_versions_button.setText("🔄 Загрузка...")
         
         # Пытаемся получить список доступных версий из сети
+        online_versions = []
         try:
-            self.all_versions = get_version_list()
+            online_versions = get_version_list()
             self.offline_mode = False
             self.refresh_versions_button.setText("🔄 Обновить")
             self.refresh_versions_button.setEnabled(True)
         except Exception as e:
-            # Оффлайн-режим: берём только локально установленные версии
-            self.all_versions = self.get_installed_versions()
             self.offline_mode = True
             self.refresh_versions_button.setText("🔄 Обновить (офлайн)")
             self.refresh_versions_button.setEnabled(True)
-            # Показываем сообщение об ошибке только если это не первая загрузка
             if hasattr(self, '_first_load_done'):
                 QMessageBox.warning(self, "Ошибка сети", 
                     f"Не удалось загрузить список версий из интернета.\n"
                     f"Показываются только установленные версии.\n"
                     f"Ошибка: {str(e)}")
+
+        # Всегда объединяем онлайн-версии с локально установленными (включая мод-паки)
+        installed_versions = self.get_installed_versions()
+        # Объединяем списки, избегая дубликатов по 'id'
+        all_versions_map = {v['id']: v for v in online_versions}
+        for v in installed_versions:
+            all_versions_map[v['id']] = v # Локальные версии (мод-паки) имеют приоритет
+        self.all_versions = list(all_versions_map.values())
 
         # В оффлайне отключаем фильтр типов, в онлайне включаем
         self.version_filter.setDisabled(self.offline_mode)
@@ -1387,6 +1684,8 @@ class MainWindow(QMainWindow):
                 allowed_types = {'release'}
             elif mode == 'Снапшоты':
                 allowed_types = {'snapshot'}
+            elif mode == 'Модифицированные':
+                allowed_types = {'modified'}
             else:
                 allowed_types = None  # Все
 
@@ -1444,7 +1743,7 @@ class MainWindow(QMainWindow):
 
     def is_version_installed(self, version_id: str) -> bool:
         """Проверяет, установлена ли версия локально"""
-        version_dir = os.path.join(minecraft_directory, 'versions', version_id)
+        version_dir = os.path.join(self.minecraft_directory, 'versions', version_id)
         version_json = os.path.join(version_dir, f"{version_id}.json")
         return os.path.isdir(version_dir) and os.path.isfile(version_json)
 
@@ -1464,7 +1763,7 @@ class MainWindow(QMainWindow):
         return self.is_modloader_supported_for(mc_version, 'fabric')
 
     def get_installed_versions(self):
-        versions_dir = os.path.join(minecraft_directory, 'versions')
+        versions_dir = os.path.join(self.minecraft_directory, 'versions')
         result = []
         try:
             if not os.path.isdir(versions_dir):
@@ -1476,7 +1775,15 @@ class MainWindow(QMainWindow):
                 # Установленная версия обычно имеет файл <version>/<version>.json
                 json_manifest = os.path.join(entry_path, f"{entry}.json")
                 if os.path.isfile(json_manifest):
-                    result.append({'id': entry})
+                    try:
+                        with open(json_manifest, 'r', encoding='utf-8') as f:
+                            version_data = json.load(f)
+                        # Предполагаем, что мод-паки могут иметь свой тип, например 'modified'
+                        version_type = version_data.get('type', 'release')
+                        result.append({'id': entry, 'type': version_type})
+                    except Exception:
+                        # Если JSON невалиден, считаем обычной версией
+                        result.append({'id': entry, 'type': 'release'})
         except Exception:
             pass
         return result
@@ -1529,49 +1836,6 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 self.account_type.setCurrentIndex(index)
 
-    def add_microsoft_account(self):
-        ok, msg = _check_microsoft_prereqs()
-        if not ok:
-            QMessageBox.warning(self, 'Microsoft', f'Библиотека Microsoft-логина недоступна.\n{msg}')
-            return
-        try:
-            # Папка для хранения токенов (рекомендуемая библиотекой)
-            ms_dir = os.path.join(os.getenv('APPDATA'), '.MjnLauncher', 'ms')
-            os.makedirs(ms_dir, exist_ok=True)
-            # Используем совместимую обёртку, чтобы поддержать разные версии библиотеки
-            login_data = _ms_login(token_directory=ms_dir)
-            # login_data содержит access_token, uuid, name
-            profile_nick = login_data.get('name') or 'Player'
-            new_user = {
-                'nickname': profile_nick,
-                'type': 'microsoft',
-                'uuid': login_data.get('id') or login_data.get('uuid') or '',
-                'access_token': login_data.get('access_token') or login_data.get('accessToken') or ''
-            }
-            try:
-                with open(self.users_path, 'r', encoding='utf-8') as f:
-                    users = json.load(f)
-            except Exception:
-                users = []
-            # Заменяем по uuid, если уже есть
-            replaced = False
-            for i, u in enumerate(users):
-                if u.get('type') == 'microsoft' and u.get('uuid') == new_user['uuid']:
-                    users[i] = new_user
-                    replaced = True
-                    break
-            if not replaced:
-                users.append(new_user)
-            with open(self.users_path, 'w', encoding='utf-8') as f:
-                json.dump(users, f, indent=4, ensure_ascii=False)
-            self.load_accounts()
-            idx = self.account_type.findText(profile_nick)
-            if idx >= 0:
-                self.account_type.setCurrentIndex(idx)
-            QMessageBox.information(self, 'Microsoft', 'Аккаунт добавлен.')
-        except Exception as e:
-            QMessageBox.warning(self, 'Microsoft', f'Ошибка входа: {e}')
-
     def state_update(self, value: bool):
         self.start_button.setDisabled(value)
         self.start_progress.setVisible(value)
@@ -1592,7 +1856,7 @@ class MainWindow(QMainWindow):
         display_text = self.version_select.currentText()
         version_id = display_text.replace("✅ ", "").replace("⬇️ ", "")
         
-        self.launch_thread.launch_setup_signal.emit(version_id, nick)
+        self.launch_thread.launch_setup_signal.emit(version_id, nick, self.minecraft_directory)
         self.launch_thread.start()
         # Сохраняем выбранную версию на момент запуска
         try:
